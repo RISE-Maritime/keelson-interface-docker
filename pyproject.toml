@@ -4,6 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keelson-interface-docker"
+# NOT the published version. The release workflow overwrites this from the
+# release tag (`uv version --frozen`), so the tag and the artifact cannot
+# disagree. This value only matters for local installs -- do not hand-bump it
+# before tagging; that manual step is what broke keelson's own release 0.5.4.
 version = "0.1.0"
 description = "Keelson RPC responder exposing host container control (container_control/v1)"
 readme = "README.md"

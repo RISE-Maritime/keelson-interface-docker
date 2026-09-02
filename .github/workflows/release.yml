@@ -8,6 +8,39 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
+      # REQUIRED, and its absence is what broke release 0.1.0-pre.1.
+      #
+      # `docker/build-push-action` defaults to the *Git* context: given no
+      # `context:` it fetches the repository itself, which is why this workflow
+      # worked for years with no checkout step. Adding `context: .` pointed it at
+      # the runner's working directory instead -- which, with nothing checked
+      # out, is empty. The build then reported `transferring dockerfile: 2B` and
+      # failed with "failed to read dockerfile: open Dockerfile: no such file or
+      # directory", before fetching or compiling anything.
+      #
+      # `ci-checks.yml`'s docker-build job has always had this step, which is why
+      # it stayed green while releases failed.
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v7
+
+      # The release tag is the single source of truth for the published version.
+      # `__init__.py` reads it back out of the installed metadata at runtime, so
+      # writing it here means the tag people pull and the version the process
+      # reports cannot disagree. Guarding a hand-maintained version would only
+      # detect that drift; deriving it makes the drift impossible.
+      #
+      # `--frozen` matters: plain `uv version` writes the file and then tries to
+      # re-lock and sync, which exits non-zero and fails the job even though the
+      # version was set correctly.
+      #
+      # Note the spellings differ on purpose. uv normalises to PEP 440, so the
+      # tag `0.1.0-pre.2` gives a package version of `0.1.0rc2`, while the image
+      # below is still tagged `0.1.0-pre.2` -- that comes from `tag_name`
+      # untouched.
+      - name: Set the version from the release tag
+        run: uv version --frozen "${{ github.event.release.tag_name }}"
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -18,6 +51,7 @@ jobs:
       - id: docker_build
         uses: docker/build-push-action@v6
         with:
+          # Requires the checkout above. Do not remove one without the other.
           context: .
           file: Dockerfile
           push: true
@@ -26,6 +60,9 @@ jobs:
           # The org is rise-maritime. This was hard-coded to ghcr.io/mo-rise/...
           # until 2026-08; that :latest is frozen at the 2023 image and nothing
           # auto-upgrades off it, so every deployment must be repointed by hand.
+          #
+          # Tags are bare `X.Y.Z` / `X.Y.Z-pre.N`, matching the rest of the
+          # fleet (ghcr.io/rise-maritime/keelson:0.6.0-pre.13). No `v` prefix.
           tags: |
             ghcr.io/rise-maritime/keelson-interface-docker:latest
             ghcr.io/rise-maritime/keelson-interface-docker:${{ github.event.release.tag_name }}

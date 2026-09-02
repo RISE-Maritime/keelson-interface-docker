@@ -30,7 +30,7 @@ from keelson.scaffolding import (
     setup_logging,
 )
 
-from . import handlers, logs_follower, selfid
+from . import handlers, logs_follower, selfid, status_publisher
 from .backend import BackendError, DockerBackend, snapshots_by_label
 from .guard import ControlGuard
 from .interfaces import INTERFACE, VERSION
@@ -89,6 +89,42 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "This responder's own container_name. Set it to the same literal as "
             "your compose file's container_name: so it can refuse to stop itself."
+        ),
+    )
+
+    status = parser.add_argument_group("container status (on by default)")
+    status.add_argument(
+        "--publish-status",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Publish the container set as the 'container_status' subject "
+            "whenever it changes, so consoles subscribe instead of polling "
+            "list() per host. ON BY DEFAULT, unlike --allow-control and "
+            "--follow-logs: those are off because they are privileged (one "
+            "mutates the host, the other republishes container stdout). This "
+            "publishes precisely the bytes list() already hands to any bus "
+            "participant who asks -- the same answer, on time, not a wider one."
+        ),
+    )
+    status.add_argument(
+        "--status-interval-s",
+        type=float,
+        default=5.0,
+        help=(
+            "How often the container set is snapshotted and compared. This is "
+            "the worst-case latency of a state change reaching a console, and "
+            "it must beat the poll it replaces to be an improvement."
+        ),
+    )
+    status.add_argument(
+        "--status-heartbeat-s",
+        type=float,
+        default=30.0,
+        help=(
+            "Republish unchanged state at most this often. Zenoh pub/sub does "
+            "not backfill, so this bounds how stale a late subscriber's first "
+            "value is."
         ),
     )
 
@@ -165,7 +201,11 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
     # publish -- a responder that captures nothing must not advertise that it
     # might. (serve_rpc declares the interface-level token itself, so it is not
     # passed here.)
-    published_subjects = [logs_follower.SUBJECT] if args.follow_logs else []
+    published_subjects = []
+    if args.publish_status:
+        published_subjects.append(status_publisher.SUBJECT)
+    if args.follow_logs:
+        published_subjects.append(logs_follower.SUBJECT)
 
     with declare_liveliness(
         session,
@@ -200,6 +240,19 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
         # Inside the liveliness context, so the subject token is up before the
         # first line is published and comes down after the last.
         with ExitStack() as stack:
+            if args.publish_status:
+                stack.enter_context(
+                    status_publisher.ContainerStatusPublisher(
+                        ctx.backend,
+                        ctx.guard,
+                        session,
+                        base_path=args.realm,
+                        entity_id=args.entity_id,
+                        source_id=args.source_id,
+                        interval_s=args.status_interval_s,
+                        heartbeat_s=args.status_heartbeat_s,
+                    )
+                )
             if args.follow_logs:
                 stack.enter_context(
                     logs_follower.LogFollower(

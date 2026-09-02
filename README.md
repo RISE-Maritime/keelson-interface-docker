@@ -115,7 +115,7 @@ it is not the default here, but it is the right answer where the host matters.
 ```yaml
 services:
   keelson-interface-docker:
-    image: ghcr.io/rise-maritime/keelson-interface-docker:v1.0.0
+    image: ghcr.io/rise-maritime/keelson-interface-docker:0.1.0-pre.2
     container_name: keelson-interface-docker
     restart: unless-stopped
     init: true                      # forwards SIGTERM to PID 1 — see below
@@ -265,6 +265,30 @@ SIGTERM handling — on a machine with no Docker daemon, and in CI.
 The generated `*_pb2.py` are **committed**, because nothing regenerates them
 between this repo and its container image. CI regenerates and `git diff
 --exit-code`s them, so they cannot drift from the `.proto`.
+
+### Releasing
+
+Tags are bare `X.Y.Z` / `X.Y.Z-pre.N`, matching the rest of the fleet
+(`ghcr.io/rise-maritime/keelson:0.6.0-pre.13`) — no `v` prefix.
+
+**The tag is the version.** The release workflow writes it into
+`pyproject.toml` with `uv version --frozen` before building, and `__init__.py`
+reads it back out of the installed metadata at runtime, so the tag you pull and
+the version the process reports cannot disagree. Do not hand-bump the version in
+`pyproject.toml`; it is a placeholder and is labelled as one.
+
+The two spellings differ on purpose. `uv` normalises to PEP 440, so a tag of
+`0.1.0-pre.2` gives a *package* version of `0.1.0rc2` while the *image* stays
+tagged `0.1.0-pre.2` — that one comes straight from the tag. Checking both:
+
+```bash
+docker run --rm --entrypoint python \
+  ghcr.io/rise-maritime/keelson-interface-docker:0.1.0-pre.2 \
+  -c "import keelson_interface_docker as k; print(k.__version__)"    # 0.1.0rc2
+```
+
+A release builds from the tagged commit, so a failed release cannot be fixed by
+re-running the workflow — the fix has to be merged and a new tag cut.
 
 ## Capturing logs to MCAP
 
