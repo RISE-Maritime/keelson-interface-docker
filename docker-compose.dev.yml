@@ -1,0 +1,37 @@
+# Local development override, for macOS / Docker Desktop.
+#
+#   docker compose -f docker-compose.docker.yml -f docker-compose.dev.yml up --build
+#
+# Three things differ from the deployed shape, all of them Docker Desktop
+# consequences rather than preferences:
+#
+# 1. `user: "0:0"`. Inside the Docker Desktop VM the socket is root:root, so no
+#    host gid helps and group_add cannot work. Run as root there -- and only there.
+#    (No .env is needed for this path: the base file DEFAULTS DOCKER_GID rather
+#    than requiring it, precisely so this override can be reached. Compose
+#    interpolates each -f file before merging them, so a `${VAR:?}` guard in the
+#    base file would abort the run before `!reset` here was ever applied.)
+#
+# 2. Bridge networking instead of `network_mode: host`. Docker Desktop's host
+#    networking joins the Linux VM's namespace, NOT the Mac's, so a router whose
+#    port is published on the Mac is not at 127.0.0.1 from in there -- the
+#    container starts, serves nothing reachable, and looks fine in its logs.
+#    host-gateway is the way back to the Mac.
+#
+# 3. `read_only: false`, because a rebuilt image writes bytecode on first import.
+services:
+  keelson-interface-docker:
+    user: "0:0"
+    group_add: !reset []
+    read_only: false
+
+    network_mode: !reset null
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # --mode client: peer discovery has nothing to scout on the bridge network.
+    command: >
+      --log-level 20
+      -r rise -e masslab -s masslab-4
+      --mode client --connect tcp/host.docker.internal:7447
+      --self-container-name keelson-interface-docker

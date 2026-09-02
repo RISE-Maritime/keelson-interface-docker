@@ -1,40 +1,73 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
-
 name: CI checks
 
 on:
   push:
-    branches: [ main ]
+    # The default branch of this repo is `master`, not `main`. The old workflow
+    # listed only `main`, which is why CI had never run once since 2023.
+    branches: [master, main]
   pull_request:
-    branches: [ main ]
 
 jobs:
-  linting-bash:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v1
-      - name: Run ShellCheck
-        uses: azohra/shell-linter@latest
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v4
+      - run: uv pip install --system ".[dev]"
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
 
-
-  linting-python:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python 3
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.x'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements_dev.txt
-    - name: Run black
-      run: |
-        black --check bin/*
-    - name: Run pylint
-      run: |
-        pylint bin/*
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v4
+      - run: uv pip install --system ".[dev]"
+      # RUN_E2E opens two real Zenoh sessions over loopback; it is the only
+      # coverage of the actual key expressions and the serve_rpc wiring.
+      - run: pytest -v
+        env:
+          RUN_E2E: '1'
 
+  proto-drift:
+    # The generated *_pb2 are committed because nothing regenerates them between
+    # this repo and its image. This job is what stops them drifting from the
+    # .proto they came from.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v4
+      - run: bash scripts/generate_protos.sh
+      - name: Generated code is in step with interfaces/*.proto
+        run: git diff --exit-code -- src/keelson_interface_docker/interfaces
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: keelson-interface-docker:ci
+      - name: The entrypoint starts
+        run: docker run --rm keelson-interface-docker:ci --help
+      - name: The healthcheck reports failure when no socket is mounted
+        # The runner's socket is not bind-mounted into the container, so the
+        # probe MUST exit non-zero. Asserts the entry point exists, runs as
+        # uid 10001, and reports rather than crashing -- without needing a
+        # daemon inside the job.
+        run: |
+          ! docker run --rm --entrypoint container-control-healthcheck \
+              keelson-interface-docker:ci

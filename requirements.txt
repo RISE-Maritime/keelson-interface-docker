@@ -1,4 +1,0 @@
-eclipse-zenoh==0.10.0rc0
-environs==9.5.0
-docker==6.1.3
-git+https://github.com/MO-RISE/keelson.git@0.1.0-pre.15#subdirectory=brefv/python

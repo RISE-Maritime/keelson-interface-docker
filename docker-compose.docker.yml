@@ -1,0 +1,80 @@
+services:
+
+  keelson-interface-docker:
+    build: .
+    image: ghcr.io/rise-maritime/keelson-interface-docker:latest
+    container_name: keelson-interface-docker
+    restart: unless-stopped
+
+    # Docker's built-in init: reaps zombies and, more to the point, forwards
+    # SIGTERM to PID 1 so `docker stop` reaches GracefulShutdown. A process
+    # running as PID 1 with no handler installed does not get the default
+    # signal action, so without this the container waits out the full 10s grace
+    # period and is then SIGKILLed with its liveliness tokens still standing.
+    init: true
+
+    network_mode: host
+
+    # MOUNTING THE DOCKER SOCKET MAKES THIS CONTAINER ROOT-EQUIVALENT ON THE
+    # HOST: anything that can reach the Engine API through it can start a
+    # privileged container with / bind-mounted.
+    #
+    # This mount used to carry `:ro`. That was theatre -- the Engine API is
+    # POST-over-HTTP on this socket, and a read-only inode does not make
+    # `POST /containers/{id}/stop` fail. It read as a safeguard while providing
+    # none, so it is gone. The real control is the process's own guard:
+    # read-only unless --allow-control, and then only the --allow globs.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    # The image runs as uid 10001, which cannot open a root:docker 0660 socket.
+    # Add the host's docker group rather than running as root:
+    #
+    #   echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" > .env    # Linux
+    #
+    # NOT `${DOCKER_GID:?...}`, tempting as a required variable is here.
+    # Compose interpolates every -f file BEFORE merging them, so a `:?` guard
+    # in this file aborts the run before docker-compose.dev.yml (which drops
+    # group_add entirely, because Docker Desktop's in-VM socket is root:root and
+    # no host gid helps) is ever read -- making the documented macOS path
+    # impossible. The default below keeps that path working.
+    #
+    # Getting this wrong is not silent: gid 0 does not open a root:docker 0660
+    # socket either, so the responder exits at startup with a message naming
+    # DOCKER_GID rather than running blind. The check lives there, where it can
+    # see the actual socket, instead of here where it can only see a variable.
+    group_add:
+      - "${DOCKER_GID:-0}"
+
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    # Read by the third self-identification strategy. Harmless, and the only
+    # route that survives both host networking (which makes $HOSTNAME the
+    # host's, not the container's) and a renamed container.
+    labels:
+      keelson.container_control.self: "1"
+
+    environment:
+      - PYTHONUNBUFFERED=1
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    # READ-ONLY as written. To permit start/stop/restart, add --allow-control
+    # and one or more --allow globs, and keep --self-container-name in step with
+    # container_name: above:
+    #   --allow-control --allow 'keelson-*'
+    command: >
+      --log-level 20
+      -r rise -e crab -s big
+      --mode peer --connect tcp/127.0.0.1:7447
+      --self-container-name keelson-interface-docker
+      --allow-control --allow '*'

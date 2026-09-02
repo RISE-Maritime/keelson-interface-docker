@@ -1,0 +1,246 @@
+syntax = "proto3";
+
+package keelson.interfaces.container_control;
+
+import "google/protobuf/timestamp.proto";
+
+// RPC interface for inspecting and controlling the containers running on one
+// host: list them, tail their logs, start / stop / restart them.
+//
+// Contract, not implementation. The reference server is
+// RISE-Maritime/keelson-interface-docker, which speaks the Docker Engine API,
+// but nothing here is Docker-shaped: a podman or containerd responder can serve
+// the same five procedures.
+//
+// CONTAINERS ARE ADDRESSED BY NAME, NOT BY ID. The container id changes on every
+// `docker compose up --force-recreate`, so a caller that round-trips an id from a
+// `list` addresses a container that no longer exists as soon as the operator
+// redeploys -- and gets NOT_FOUND for a container plainly on the screen. The name
+// is what the operator reads, what compose pins via `container_name`, and what a
+// responder's control allow-list matches on. ContainerInfo still returns the id,
+// for display and for correlating with `docker ps` output.
+//
+// CONTROL IS EXPECTED TO BE REFUSED. A responder holding a Docker socket is
+// root-equivalent on its host, so the reference implementation is read-only
+// unless explicitly configured otherwise. `start` / `stop` / `restart` therefore
+// reply ErrorResponse.PERMISSION_DENIED as a NORMAL outcome, not an error
+// condition. ListContainersResponse.control_enabled and
+// ContainerInfo.controllable let a client render that honestly up front instead
+// of discovering it on the operator's click.
+
+// -----------------------------------------------------------------------------
+// Enumerations
+// -----------------------------------------------------------------------------
+
+// The container lifecycle states. Values mirror the Docker Engine's state
+// vocabulary, which containerd and podman also use. ContainerInfo.raw_state
+// carries whatever the runtime actually said, so a state this enum does not yet
+// model is preserved rather than flattened to UNSPECIFIED.
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_STATE_CREATED = 1;
+  CONTAINER_STATE_RUNNING = 2;
+  CONTAINER_STATE_PAUSED = 3;
+  CONTAINER_STATE_RESTARTING = 4;
+  CONTAINER_STATE_REMOVING = 5;
+  CONTAINER_STATE_EXITED = 6;
+  CONTAINER_STATE_DEAD = 7;
+}
+
+// The runtime's restart policy for a container. NO is spelled explicitly because
+// the Docker API reports it as the empty string, which is indistinguishable from
+// "not reported" once it reaches a UI.
+enum RestartPolicy {
+  RESTART_POLICY_UNSPECIFIED = 0;
+  RESTART_POLICY_NO = 1;
+  RESTART_POLICY_ALWAYS = 2;
+  RESTART_POLICY_UNLESS_STOPPED = 3;
+  RESTART_POLICY_ON_FAILURE = 4;
+}
+
+// Health-check result. NONE and UNSPECIFIED are different answers: NONE means the
+// container declares no health check, UNSPECIFIED means the responder could not
+// determine one.
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_NONE = 1;
+  HEALTH_STATUS_STARTING = 2;
+  HEALTH_STATUS_HEALTHY = 3;
+  HEALTH_STATUS_UNHEALTHY = 4;
+}
+
+// Which stream one log line came from. UNSPECIFIED is the honest answer for a
+// TTY-allocated container, whose streams are merged before the runtime sees them
+// and cannot be separated after the fact.
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT = 1;
+  LOG_STREAM_STDERR = 2;
+}
+
+// Which streams a caller wants back. Separate from LogStream so the zero value
+// can mean "both" on the request side without meaning "both" on a line.
+enum LogStreamSelector {
+  LOG_STREAM_SELECTOR_UNSPECIFIED = 0;  // both
+  LOG_STREAM_SELECTOR_STDOUT = 1;
+  LOG_STREAM_SELECTOR_STDERR = 2;
+  LOG_STREAM_SELECTOR_BOTH = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Container description
+// -----------------------------------------------------------------------------
+
+message ContainerInfo {
+  // The operator-meaningful handle. Unique per host; the value every other
+  // procedure here takes.
+  string name = 1;
+
+  // The runtime's own identifier, for display and correlation only. Unstable
+  // across recreate -- do not address a container by it.
+  string id = 2;
+
+  // Image reference as deployed, e.g. "ghcr.io/rise-maritime/keelson:0.6.0-pre.13".
+  // Falls back to the configured image reference when the running image carries
+  // no tag (pulled by digest, or the tag was pruned out from under it).
+  string image = 3;
+
+  ContainerState state = 4;
+
+  // The runtime's raw state string, preserved so an unmodelled state is not lost.
+  string raw_state = 5;
+
+  google.protobuf.Timestamp created_at = 6;
+
+  // Unset if the container has never run. (The Docker API reports the zero time
+  // "0001-01-01T00:00:00Z" here, which renders as a year-1 date if passed through.)
+  google.protobuf.Timestamp started_at = 7;
+
+  // Unset while the container is running or has never run.
+  google.protobuf.Timestamp finished_at = 8;
+
+  // Present only once the container has exited at least once.
+  optional int32 exit_code = 9;
+
+  RestartPolicy restart_policy = 10;
+  // Only meaningful for RESTART_POLICY_ON_FAILURE.
+  uint32 restart_policy_max_retries = 11;
+  // How many times the runtime has restarted this container under that policy.
+  uint32 restart_count = 12;
+
+  HealthStatus health = 13;
+
+  // Whether THIS responder would presently permit start / stop / restart on this
+  // container. False for a read-only responder, for a container outside its
+  // allow-list, and always for the responder's own container.
+  bool controllable = 14;
+
+  // DELIBERATE LEAK: grouping metadata from the orchestrator that deployed the
+  // container (Docker Compose's `com.docker.compose.project` / `.service`
+  // labels, or an equivalent). Empty when the container was not deployed by one.
+  // Modelled because a 30-container host is unreadable without it; named after
+  // the concept rather than the label so another orchestrator can populate it.
+  string compose_project = 15;
+  string compose_service = 16;
+}
+
+// -----------------------------------------------------------------------------
+// list
+// -----------------------------------------------------------------------------
+
+message ListContainersRequest {
+  // Default (false) returns every container including stopped ones -- a client
+  // cannot offer "start" for a container it was never told about.
+  bool running_only = 1;
+
+  // Optional shell-style glob against ContainerInfo.name. Empty matches all.
+  string name_glob = 2;
+}
+
+message ListContainersResponse {
+  repeated ContainerInfo containers = 1;
+
+  // When the responder read the runtime's state.
+  google.protobuf.Timestamp observed_at = 2;
+
+  // False when this responder is read-only: every start/stop/restart on it will
+  // reply PERMISSION_DENIED regardless of which container is named.
+  bool control_enabled = 3;
+}
+
+// -----------------------------------------------------------------------------
+// logs
+// -----------------------------------------------------------------------------
+
+message GetLogsRequest {
+  string name = 1;
+
+  // Lines from the end of the log. 0 selects the responder's default; values
+  // above its ceiling are clamped, and the effective value comes back in
+  // GetLogsResponse.tail_lines rather than erroring.
+  uint32 tail_lines = 2;
+
+  // Optional: only lines at or after this instant.
+  google.protobuf.Timestamp since = 3;
+
+  LogStreamSelector stream = 4;
+}
+
+message LogLine {
+  // Unset when the runtime emitted no parseable timestamp for the line.
+  google.protobuf.Timestamp time = 1;
+  LogStream stream = 2;
+  string text = 3;
+}
+
+message GetLogsResponse {
+  string name = 1;
+  string id = 2;
+  repeated LogLine lines = 3;
+
+  // True when the responder dropped lines to stay under its byte ceiling. The
+  // OLDEST lines are dropped, so `lines` is always the most recent window.
+  bool truncated = 4;
+
+  // The tail_lines the responder actually applied after defaulting/clamping.
+  uint32 tail_lines = 5;
+}
+
+// -----------------------------------------------------------------------------
+// start / stop / restart
+// -----------------------------------------------------------------------------
+
+message StartContainerRequest {
+  string name = 1;
+}
+
+message StopContainerRequest {
+  string name = 1;
+  // Grace period before SIGKILL. 0 selects the responder's default.
+  uint32 timeout_s = 2;
+}
+
+message RestartContainerRequest {
+  string name = 1;
+  uint32 timeout_s = 2;
+}
+
+// Shared by start, stop and restart. Carries the container's state AFTER the
+// operation, so a client does not have to follow every action with a `list` and
+// race the runtime for the answer. All three are idempotent: starting a running
+// container or stopping a stopped one succeeds and returns its unchanged state.
+message ContainerActionResponse {
+  ContainerInfo container = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ContainerControl {
+  rpc list(ListContainersRequest) returns (ListContainersResponse);
+  rpc logs(GetLogsRequest) returns (GetLogsResponse);
+  rpc start(StartContainerRequest) returns (ContainerActionResponse);
+  rpc stop(StopContainerRequest) returns (ContainerActionResponse);
+  rpc restart(RestartContainerRequest) returns (ContainerActionResponse);
+}

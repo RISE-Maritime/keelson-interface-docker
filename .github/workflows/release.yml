@@ -8,29 +8,25 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      -
-        name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      -
-        name: Build and push
-        id: docker_build
-        uses: docker/build-push-action@v2
+      - id: docker_build
+        uses: docker/build-push-action@v6
         with:
+          context: .
           file: Dockerfile
           push: true
+          # The platforms this runs on include arm64 SBCs.
+          platforms: linux/amd64,linux/arm64
+          # The org is rise-maritime. This was hard-coded to ghcr.io/mo-rise/...
+          # until 2026-08; that :latest is frozen at the 2023 image and nothing
+          # auto-upgrades off it, so every deployment must be repointed by hand.
           tags: |
-            ghcr.io/mo-rise/keelson-interface-docker:latest
-            ghcr.io/mo-rise/keelson-interface-docker:${{ github.event.release.tag_name }}
-      -
-        name: Image digest
-        run: echo ${{ steps.docker_build.outputs.digest }}
+            ghcr.io/rise-maritime/keelson-interface-docker:latest
+            ghcr.io/rise-maritime/keelson-interface-docker:${{ github.event.release.tag_name }}
+      - run: echo ${{ steps.docker_build.outputs.digest }}
