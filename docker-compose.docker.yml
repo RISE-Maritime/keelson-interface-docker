@@ -78,3 +78,5 @@ services:
       --mode peer --connect tcp/127.0.0.1:7447
       --self-container-name keelson-interface-docker
       --allow-control --allow '*'
+      --status-interval-s 5
+      --follow-logs '*'
