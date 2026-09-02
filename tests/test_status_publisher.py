@@ -64,9 +64,7 @@ def publisher_factory(monkeypatch):
     def _make(backend, *, interval_s=0.02, heartbeat_s=10.0, control=False):
         pub = ContainerStatusPublisher(
             backend,
-            ControlGuard(
-                control_enabled=control, allow_globs=("*",) if control else ()
-            ),
+            ControlGuard(control_enabled=control, allow_globs=("*",) if control else ()),
             FakeSession(),
             base_path="rise",
             entity_id="crab",

@@ -102,7 +102,7 @@ class ContainerStatusPublisher:
             self._thread.join(timeout=self._interval_s + 2.0)
         self._thread = None
 
-    def __enter__(self) -> "ContainerStatusPublisher":
+    def __enter__(self) -> ContainerStatusPublisher:
         self.start()
         return self
 
@@ -113,9 +113,7 @@ class ContainerStatusPublisher:
 
     def _snapshot(self) -> list:
         return [
-            model.build_container_info(
-                s, controllable=self._guard.controllable(s.name, s.id)
-            )
+            model.build_container_info(s, controllable=self._guard.controllable(s.name, s.id))
             for s in sorted(self._backend.list(), key=lambda s: s.name)
         ]
 

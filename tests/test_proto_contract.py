@@ -158,9 +158,7 @@ class TestSubjectRegistration:
     def test_the_shipped_yaml_names_this_payload(self):
         from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
 
-        keelson.add_well_known_subjects_and_proto_definitions(
-            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
-        )
+        keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
         assert keelson.is_subject_well_known("container_status")
         assert (
             keelson.get_subject_schema("container_status")
@@ -170,9 +168,7 @@ class TestSubjectRegistration:
     def test_the_pubsub_key_is_one_per_host(self):
         from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
 
-        keelson.add_well_known_subjects_and_proto_definitions(
-            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
-        )
+        keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
         # No trailing container chunk -- unlike log_message, which is one key per
         # container. See ContainerHostStatus's comment for why removal is the
         # reason.
@@ -190,9 +186,7 @@ class TestSubjectRegistration:
             ContainerHostStatus,
         )
 
-        keelson.add_well_known_subjects_and_proto_definitions(
-            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
-        )
+        keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
         msg = ContainerHostStatus(control_enabled=True, sequence=3)
         msg.observed_at.FromNanoseconds(1_700_000_000_000_000_000)
         msg.containers.add(name="nginx")

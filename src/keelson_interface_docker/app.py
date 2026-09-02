@@ -293,9 +293,7 @@ def main() -> None:
     zenoh.init_log_from_env_or(logging.getLevelName(args.log_level))
 
     keelson.add_well_known_interfaces(INTERFACES_YAML)
-    keelson.add_well_known_subjects_and_proto_definitions(
-        SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
-    )
+    keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
 
     backend = DockerBackend()
     try:

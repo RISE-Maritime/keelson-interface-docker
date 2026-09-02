@@ -401,11 +401,51 @@ declares: `{realm}/@v0/{entity}/@rpc/container_control/v1/*/{source}`. Present
 means serving. Crowsnest already derives its "is this responder alive?" dot from
 exactly that.
 
-### It does not publish container or host stats
+### It publishes container state
 
-Logs were a different case, and the difference is the whole reason one was
-done and the other was not: `log_message` → `foxglove.Log` already existed
-upstream, with a QoS profile assigned. Resource metrics have no such subject.
+`container_status` → `keelson.interfaces.container_control.ContainerHostStatus`,
+on `{realm}/@v0/{entity}/pubsub/container_status/{source_id}` — **one key per
+host**, carrying the complete container set, `observed_at` and
+`control_enabled`. Exactly what `list` answers, published when it changes so a
+console does not have to ask N hosts every fifteen seconds.
+
+Controlled by `--publish-status` (**on by default**), `--status-interval-s`
+(5.0) and `--status-heartbeat-s` (30.0). On by default unlike `--allow-control`
+and `--follow-logs`, and that is consistent rather than a departure: those two
+are off because they are *privileged* — one mutates the host, the other
+republishes container stdout. This publishes precisely the bytes `list` already
+hands to any bus participant who asks.
+
+**Change plus heartbeat, not every tick.** An unchanged tick stays silent, which
+is the entire saving. But zenoh pub/sub does not backfill, so a subscriber that
+joins during a quiet period would otherwise wait indefinitely for its first
+value; the heartbeat bounds that wait rather than removing it, which is why a
+consumer should still prime itself with one `list` call on arrival.
+
+**One key per host, never per container** — unlike logs, which go the other way
+so Foxglove gets one channel per container to toggle. A per-container state key
+cannot express *removal*: a deleted container simply stops publishing, which is
+indistinguishable from a quiet one, a wedged publisher and a dead host. A
+whole-host snapshot expresses removal by omission, and "that container is gone"
+is exactly what an operator needs to see.
+
+**A recorder needs two extra files.** The subject and its payload are registered
+locally at startup (`interfaces/subjects.yaml` plus the generated
+`ContainerControl.desc`), the same way this repo registers its interface, so
+`keelson2mcap` must be given the same pair or it writes an undecodable blob:
+
+```
+--extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc
+```
+
+It is *not* a sixth procedure — see below.
+
+### It does not publish container or host **resource** stats
+
+Logs and state were different cases, and the difference is the whole reason
+those were done and this was not: `log_message` → `foxglove.Log` already existed
+upstream with a QoS profile assigned, and container state is the literal content
+of an existing procedure's response. Resource metrics are neither.
 
 `docker stats`-style telemetry (CPU, memory, restart history) is not on the bus,
 for three independent reasons:
@@ -417,7 +457,9 @@ for three independent reasons:
    RPC; and adding a procedure to a published interface version is a breaking
    change requiring `v2`, because a consumer cannot tell "this implementor
    predates the method" from "this implementor is unreachable" — zenoh returns
-   no reply for both.
+   no reply for both. This is why `container_status` above is a *message* and a
+   subject, not a procedure: adding a message changes no existing message's wire
+   format and leaves `service ContainerControl` at five procedures.
 3. **The fleet already answers it, off-bus and on purpose.** netdata and
    portainer run per platform. Putting per-container stats on the bus would buy
    a worse version of a deployed tool, on the link that carries navigation data.
