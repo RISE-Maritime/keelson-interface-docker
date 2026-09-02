@@ -43,6 +43,13 @@ logger = logging.getLogger("keelson-interface-docker")
 #: lands in keelson's own messages/interfaces.yaml.
 INTERFACES_YAML = Path(__file__).parent / "interfaces" / "interfaces.yaml"
 
+#: The pub/sub half of the same registry, shipped the same way. Registering the
+#: subject stops construct_pubsub_key() warning, and registering the descriptor
+#: set alongside it is what lets a subscriber -- and keelson2mcap, through
+#: --extra-subjects-types -- DECODE the payload rather than just name it.
+SUBJECTS_YAML = Path(__file__).parent / "interfaces" / "subjects.yaml"
+PROTO_DESCRIPTOR_SET = Path(__file__).parent / "interfaces" / "ContainerControl.desc"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -233,6 +240,9 @@ def main() -> None:
     zenoh.init_log_from_env_or(logging.getLevelName(args.log_level))
 
     keelson.add_well_known_interfaces(INTERFACES_YAML)
+    keelson.add_well_known_subjects_and_proto_definitions(
+        SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
+    )
 
     backend = DockerBackend()
     try:

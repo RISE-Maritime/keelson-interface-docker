@@ -4,8 +4,11 @@
 # keelson.add_well_known_interfaces() so construct_rpc_key() stops warning that
 # container_control/v1 is not well known.
 #
-# THIS FILE IS THE UPSTREAMING UNIT: when ContainerControl.proto moves into the
-# keelson monorepo, this line moves into keelson's messages/interfaces.yaml and
-# this file is deleted. See README -> "Upstreaming this interface into keelson".
+# THIS FILE IS PART OF THE UPSTREAMING UNIT, which is now three files: when
+# ContainerControl.proto moves into the keelson monorepo, this line moves into
+# keelson's messages/interfaces.yaml, interfaces/subjects.yaml's line moves into
+# messages/subjects.yaml, and the generated ContainerControl.desc is subsumed by
+# keelson's own bundled descriptor set. All three are then deleted.
+# See README -> "Upstreaming this interface into keelson".
 
 container_control/v1: keelson.interfaces.container_control.ContainerControl

@@ -25,18 +25,36 @@ cd "$(dirname "$0")/.."
 PROTOC_WHEEL="protoc-wheel-0==30.2"
 
 OUT=src/keelson_interface_docker/interfaces
-rm -f "$OUT"/ContainerControl_pb2.py "$OUT"/ContainerControl_pb2.pyi
+rm -f "$OUT"/ContainerControl_pb2.py "$OUT"/ContainerControl_pb2.pyi "$OUT"/ContainerControl.desc
 
-# The registry has to travel inside the installed package -- app.py loads it
-# with keelson.add_well_known_interfaces() at startup, and interfaces/ at the
-# repo root does not exist in the image. Same move keelson's own
-# generate_python.sh makes with subjects.yaml.
+# The registries have to travel inside the installed package -- app.py loads
+# them with keelson.add_well_known_interfaces() and
+# keelson.add_well_known_subjects_and_proto_definitions() at startup, and
+# interfaces/ at the repo root does not exist in the image. Same move keelson's
+# own generate_python.sh makes with subjects.yaml.
+#
+# Both are listed in pyproject.toml's [tool.setuptools.package-data]. A file
+# copied here but not listed there is present in a dev checkout and ABSENT from
+# the image, which fails at startup and nowhere earlier.
 cp -f interfaces/interfaces.yaml "$OUT"/interfaces.yaml
+cp -f interfaces/subjects.yaml "$OUT"/subjects.yaml
 
 uv run --no-project --with "$PROTOC_WHEEL" protoc \
     --python_out="$OUT" \
     --pyi_out="$OUT" \
+    --descriptor_set_out="$OUT/ContainerControl.desc" \
+    --include_imports \
     --proto_path=interfaces \
     interfaces/ContainerControl.proto
 
-echo "Generated $OUT/ContainerControl_pb2.py"
+# --include_imports is load-bearing, not tidiness.
+# add_well_known_subjects_and_proto_definitions() builds a FRESH, EMPTY
+# DescriptorPool (message_factory.GetMessages -> DescriptorPool()), so nothing
+# is resolvable from the default pool. Without the imports embedded,
+# google/protobuf/timestamp.proto is missing and building ContainerHostStatus
+# raises at startup. The fresh pool is also why this does not clash with
+# ContainerControl_pb2's own registration in the default pool -- and why the
+# class it yields is a DIFFERENT object: publish with the _pb2 class, not the
+# registry's.
+
+echo "Generated $OUT/ContainerControl_pb2.py and $OUT/ContainerControl.desc"

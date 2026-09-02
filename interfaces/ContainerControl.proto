@@ -234,6 +234,68 @@ message ContainerActionResponse {
 }
 
 // -----------------------------------------------------------------------------
+// Published state
+// -----------------------------------------------------------------------------
+
+// What `list` answers, published continuously instead of on request.
+//
+// PUBLISHED, NOT RETURNED. It is not a sixth procedure: a continuous stream is
+// pub/sub, and adding a procedure to a published interface version would be a
+// breaking change requiring v2. Adding this message changes no existing
+// message's wire format and leaves `service ContainerControl` untouched.
+//
+// Fields 1-3 deliberately carry the same numbers as ListContainersResponse.
+// The two say the same three things, and a reader diffing them should see them
+// line up rather than wonder whether the difference means something.
+//
+// ONE KEY PER HOST, never per container. A per-container key cannot express
+// REMOVAL: a deleted container simply stops publishing, which is
+// indistinguishable from a quiet one, a wedged publisher and a dead host, and
+// recovering the difference needs tombstones plus a subscriber-side timeout. A
+// whole-host snapshot expresses removal by omission, for free -- and "that
+// container is gone" is exactly what an operator needs to see. `observed_at`
+// and `control_enabled` are per-host facts besides, and per-container keys
+// would repeat them N times and let them disagree.
+//
+// (logs went the other way, one key per container, because that gives Foxglove
+// one channel per container to toggle. There is no equivalent value in
+// splitting a state snapshot, whose whole point is that it is one instant.)
+message ContainerHostStatus {
+  // ALWAYS the complete set for this host, never a delta. A subscriber replaces
+  // its state wholesale; anything absent is gone.
+  repeated ContainerInfo containers = 1;
+
+  // When the responder read the runtime's state.
+  google.protobuf.Timestamp observed_at = 2;
+
+  // False when this responder is read-only. Same meaning as on
+  // ListContainersResponse.
+  bool control_enabled = 3;
+
+  // Why this sample was sent. A console showing "last change 4 minutes ago"
+  // next to "last heard 5 seconds ago" cannot derive that from the samples
+  // alone, because an unchanged heartbeat and a real change look identical.
+  StatusTrigger trigger = 4;
+
+  // Monotonic within one process, restarting at 0. Distinguishes "the responder
+  // restarted" from "we missed a sample" sooner than a liveliness token flap
+  // does.
+  uint64 sequence = 5;
+}
+
+enum StatusTrigger {
+  STATUS_TRIGGER_UNSPECIFIED = 0;
+
+  // The container set changed since the previous sample.
+  STATUS_TRIGGER_CHANGE = 1;
+
+  // Nothing changed; this is the keep-alive. Zenoh pub/sub does not backfill,
+  // so without a periodic republish a subscriber that joins during a quiet
+  // period would wait indefinitely for its first value.
+  STATUS_TRIGGER_HEARTBEAT = 2;
+}
+
+// -----------------------------------------------------------------------------
 // Service
 // -----------------------------------------------------------------------------
 

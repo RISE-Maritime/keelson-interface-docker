@@ -42,7 +42,10 @@ container-control-healthcheck = "keelson_interface_docker.health:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-keelson_interface_docker = ["interfaces/*.yaml", "interfaces/*.pyi"]
+# *.desc is the protobuf descriptor set the subject registry decodes with.
+# Omitting it here is invisible in a dev checkout (where interfaces/ exists at
+# the repo root) and a startup FileNotFoundError in the image.
+keelson_interface_docker = ["interfaces/*.yaml", "interfaces/*.pyi", "interfaces/*.desc"]
 
 [tool.ruff]
 line-length = 100

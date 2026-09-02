@@ -47,6 +47,12 @@ class LogStreamSelector(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     LOG_STREAM_SELECTOR_STDOUT: _ClassVar[LogStreamSelector]
     LOG_STREAM_SELECTOR_STDERR: _ClassVar[LogStreamSelector]
     LOG_STREAM_SELECTOR_BOTH: _ClassVar[LogStreamSelector]
+
+class StatusTrigger(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    STATUS_TRIGGER_UNSPECIFIED: _ClassVar[StatusTrigger]
+    STATUS_TRIGGER_CHANGE: _ClassVar[StatusTrigger]
+    STATUS_TRIGGER_HEARTBEAT: _ClassVar[StatusTrigger]
 CONTAINER_STATE_UNSPECIFIED: ContainerState
 CONTAINER_STATE_CREATED: ContainerState
 CONTAINER_STATE_RUNNING: ContainerState
@@ -72,6 +78,9 @@ LOG_STREAM_SELECTOR_UNSPECIFIED: LogStreamSelector
 LOG_STREAM_SELECTOR_STDOUT: LogStreamSelector
 LOG_STREAM_SELECTOR_STDERR: LogStreamSelector
 LOG_STREAM_SELECTOR_BOTH: LogStreamSelector
+STATUS_TRIGGER_UNSPECIFIED: StatusTrigger
+STATUS_TRIGGER_CHANGE: StatusTrigger
+STATUS_TRIGGER_HEARTBEAT: StatusTrigger
 
 class ContainerInfo(_message.Message):
     __slots__ = ("name", "id", "image", "state", "raw_state", "created_at", "started_at", "finished_at", "exit_code", "restart_policy", "restart_policy_max_retries", "restart_count", "health", "controllable", "compose_project", "compose_service")
@@ -190,3 +199,17 @@ class ContainerActionResponse(_message.Message):
     CONTAINER_FIELD_NUMBER: _ClassVar[int]
     container: ContainerInfo
     def __init__(self, container: _Optional[_Union[ContainerInfo, _Mapping]] = ...) -> None: ...
+
+class ContainerHostStatus(_message.Message):
+    __slots__ = ("containers", "observed_at", "control_enabled", "trigger", "sequence")
+    CONTAINERS_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_AT_FIELD_NUMBER: _ClassVar[int]
+    CONTROL_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    TRIGGER_FIELD_NUMBER: _ClassVar[int]
+    SEQUENCE_FIELD_NUMBER: _ClassVar[int]
+    containers: _containers.RepeatedCompositeFieldContainer[ContainerInfo]
+    observed_at: _timestamp_pb2.Timestamp
+    control_enabled: bool
+    trigger: StatusTrigger
+    sequence: int
+    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ..., trigger: _Optional[_Union[StatusTrigger, str]] = ..., sequence: _Optional[int] = ...) -> None: ...

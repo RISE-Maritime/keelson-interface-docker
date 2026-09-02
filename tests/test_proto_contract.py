@@ -108,3 +108,114 @@ class TestInterfaceRegistration:
             keelson.construct_rpc_key("rise", "masslab", INTERFACE, VERSION, procedure, "masslab-4")
             == f"rise/@v0/masslab/@rpc/container_control/v1/{procedure}/masslab-4"
         )
+
+
+class TestPublishedState:
+    """The published half. Pinned for the same reason the RPC half is: two
+    implementations, no shared SDK, and only these numbers holding them
+    together."""
+
+    def test_container_host_status_field_numbers_are_pinned(self):
+        from keelson_interface_docker.interfaces.ContainerControl_pb2 import (
+            ContainerHostStatus,
+        )
+
+        assert field_numbers(ContainerHostStatus) == {
+            "containers": 1,
+            "observed_at": 2,
+            "control_enabled": 3,
+            "trigger": 4,
+            "sequence": 5,
+        }
+
+    def test_the_first_three_numbers_match_the_rpc_response(self):
+        # Not a coincidence to be tidied away later: the two carry the same three
+        # things, and a reader diffing them should see them line up.
+        from keelson_interface_docker.interfaces.ContainerControl_pb2 import (
+            ContainerHostStatus,
+        )
+
+        published = field_numbers(ContainerHostStatus)
+        answered = field_numbers(ListContainersResponse)
+        for name in ("containers", "observed_at", "control_enabled"):
+            assert published[name] == answered[name]
+
+    def test_status_trigger_distinguishes_a_change_from_a_keep_alive(self):
+        from keelson_interface_docker.interfaces.ContainerControl_pb2 import StatusTrigger
+
+        assert StatusTrigger.Name(0) == "STATUS_TRIGGER_UNSPECIFIED"
+        assert StatusTrigger.Value("STATUS_TRIGGER_CHANGE") == 1
+        assert StatusTrigger.Value("STATUS_TRIGGER_HEARTBEAT") == 2
+
+    def test_adding_it_did_not_add_a_sixth_procedure(self):
+        # The README rules out a sixth procedure as a v2-requiring break. A
+        # published message is not one, and this is what says so.
+        service = DESCRIPTOR.services_by_name["ContainerControl"]
+        assert [m.name for m in service.methods] == PROCEDURES
+
+
+class TestSubjectRegistration:
+    def test_the_shipped_yaml_names_this_payload(self):
+        from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
+
+        keelson.add_well_known_subjects_and_proto_definitions(
+            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
+        )
+        assert keelson.is_subject_well_known("container_status")
+        assert (
+            keelson.get_subject_schema("container_status")
+            == f"{DESCRIPTOR.package}.ContainerHostStatus"
+        )
+
+    def test_the_pubsub_key_is_one_per_host(self):
+        from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
+
+        keelson.add_well_known_subjects_and_proto_definitions(
+            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
+        )
+        # No trailing container chunk -- unlike log_message, which is one key per
+        # container. See ContainerHostStatus's comment for why removal is the
+        # reason.
+        assert (
+            keelson.construct_pubsub_key("rise", "crab", "container_status", "big")
+            == "rise/@v0/crab/pubsub/container_status/big"
+        )
+
+    def test_the_descriptor_set_can_actually_decode_the_payload(self):
+        # The registry builds a FRESH DescriptorPool, so the descriptor set must
+        # embed google/protobuf/timestamp.proto (protoc --include_imports).
+        # Without it this raises rather than returning a message.
+        from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
+        from keelson_interface_docker.interfaces.ContainerControl_pb2 import (
+            ContainerHostStatus,
+        )
+
+        keelson.add_well_known_subjects_and_proto_definitions(
+            SUBJECTS_YAML, PROTO_DESCRIPTOR_SET
+        )
+        msg = ContainerHostStatus(control_enabled=True, sequence=3)
+        msg.observed_at.FromNanoseconds(1_700_000_000_000_000_000)
+        msg.containers.add(name="nginx")
+
+        decoded = keelson.decode_protobuf_payload_from_type_name(
+            msg.SerializeToString(), f"{DESCRIPTOR.package}.ContainerHostStatus"
+        )
+        assert decoded.containers[0].name == "nginx"
+        assert decoded.sequence == 3
+        assert decoded.HasField("observed_at")
+
+
+class TestRegistriesShipInsideThePackage:
+    """package-data omissions are invisible in a dev checkout, where
+    interfaces/ still exists at the repo root, and a startup FileNotFoundError
+    in the image."""
+
+    def test_every_registry_file_travels_with_the_package(self):
+        from keelson_interface_docker.app import (
+            INTERFACES_YAML,
+            PROTO_DESCRIPTOR_SET,
+            SUBJECTS_YAML,
+        )
+
+        for path in (INTERFACES_YAML, SUBJECTS_YAML, PROTO_DESCRIPTOR_SET):
+            assert path.exists(), f"{path.name} is missing from the package"
