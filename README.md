@@ -164,6 +164,47 @@ joins the *Linux VM's* namespace, not the Mac's, so a router published on the
 Mac is not at `127.0.0.1` from in there — the container starts, serves nothing
 reachable, and looks perfectly healthy in its own logs.
 
+### "The console does not list this host"
+
+Almost always the host is fine and the console did not *find* it. A console has
+three ways to discover a `container_control` responder, and **two of them fail
+silently**:
+
+| Path | How it fails |
+| --- | --- |
+| An entry in the console's platform registry | Only knows what somebody typed. On Crowsnest's shipped registry exactly one platform declares `container_control` queryables — every other host depends on the paths below. |
+| The RPC-interface liveliness token | **Invisible when it fails.** Nothing renders a token that did not arrive: no row, no error, no explanation. |
+| The `container_status` subject | Visible: either snapshots arrive or they do not, and the same key carries the container list. |
+
+The third is why `--publish-status` is **on by default** while the two
+privileged flags are not — it is the only path whose failure an operator can
+see. Turning it off leaves a host discoverable only by the two paths above, and
+the process now logs a warning saying so.
+
+One deployment sat invisible in Crowsnest's container panel for weeks while
+publishing `container_status` every five seconds — running, reachable and
+answering, with nothing on any screen to say why it was missing. The console
+did not subscribe to the subject, and its registry named the entity
+`landkrabban` while the responder published as `landkrabb`.
+
+**Start with the log.** Since that episode the process prints every key it
+answers or publishes on, at startup:
+
+```
+Serving container_control/v1 at rise/@v0/landkrabb/@rpc/container_control/v1/*/docker
+Publishing container_status at rise/@v0/landkrabb/pubsub/container_status/docker
+Publishing log_message at rise/@v0/landkrabb/pubsub/log_message/docker
+```
+
+so `docker logs <container>` answers "which entity and source is this actually
+on?" without touching the bus. Compare those against what the console is looking
+for; a mismatched `-e`/`-s` is the usual answer.
+
+If they agree and the host still does not appear, check that the console
+subscribes to `container_status` — a REST `GET` on the status key proves the
+data is reaching the router, and a *stored* sample only proves it was published
+once, so compare its timestamp against now.
+
 ### Healthcheck
 
 The image carries a `HEALTHCHECK` that runs `container-control-healthcheck` —

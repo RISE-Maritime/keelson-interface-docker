@@ -194,6 +194,57 @@ def build_guard(args: argparse.Namespace, backend: DockerBackend) -> ControlGuar
     )
 
 
+def _log_addresses(args: argparse.Namespace, published_subjects: list[str]) -> None:
+    """Print, at startup, every key this process answers or publishes on.
+
+    WHY THIS IS WORTH FOUR LOG LINES. When a console does not list this host,
+    the question is always the same -- "is it not running, or is the console not
+    finding it?" -- and answering it used to mean querying the bus by hand.
+    Worse, the usual answer is the second, and it is INVISIBLE: a console
+    discovers a responder from its RPC-interface liveliness token, and a token
+    that does not arrive renders as nothing at all. No error, no row, no
+    explanation. One deployment sat in exactly that state while publishing
+    container_status every five seconds.
+
+    So the first thing an operator reaches for -- ``docker logs`` -- now names
+    the keys, and the entity/source in them can be compared against what the
+    console is looking for without touching zenoh.
+
+    Built with keelson's own key constructors, never an f-string: the RPC key
+    gained interface and version chunks in 0.6.0, and hand-built keys are how
+    consumers end up addressing a shape the responder never served.
+    """
+    logger.info(
+        "Serving %s/%s at %s",
+        INTERFACE,
+        VERSION,
+        # Positional, exactly as cli.py calls it -- the keyword names differ
+        # from construct_pubsub_key's and guessing them is a TypeError at
+        # startup, on the one code path that exists to help someone debugging.
+        keelson.construct_rpc_key(
+            args.realm, args.entity_id, INTERFACE, VERSION, "*", args.source_id
+        ),
+    )
+    for subject in published_subjects:
+        logger.info(
+            "Publishing %s at %s",
+            subject,
+            keelson.construct_pubsub_key(
+                base_path=args.realm,
+                entity_id=args.entity_id,
+                subject=subject,
+                source_id=args.source_id,
+            ),
+        )
+    if not published_subjects:
+        logger.warning(
+            "Publishing nothing. This host is then discoverable ONLY by its RPC "
+            "liveliness token or by being written into a console's registry by "
+            "hand, and a token that fails to propagate is invisible. "
+            "--publish-status is on by default; something turned it off."
+        )
+
+
 def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context) -> None:
     procedures, summarizers = handlers.build(ctx)
 
@@ -206,6 +257,8 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
         published_subjects.append(status_publisher.SUBJECT)
     if args.follow_logs:
         published_subjects.append(logs_follower.SUBJECT)
+
+    _log_addresses(args, published_subjects)
 
     with declare_liveliness(
         session,
