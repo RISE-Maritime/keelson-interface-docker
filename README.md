@@ -535,6 +535,19 @@ gap and an alert rule reads it as healthy — which is why every such field is
 `optional` in the proto and why `tests/test_proto_contract.py` pins that
 presence field by field.
 
+**The rule survives rendering and then dies in arithmetic.** Rendering absence
+as a dash is the easy half; the half that gets missed is that an absent reading
+must never reach a comparator, an average, a threshold or a sum. In a language
+where the absent value coerces — JavaScript's `null - 5` is `-5`, `null - null`
+is `0` — a naive sort promotes "never measured" to the top of an ascending CPU
+column, where it reads as *lowest*. No decoder test catches that: the decode was
+correct and the presence was intact right up until something did sums with it.
+The crowsnest implementation ranks absent rows out before comparison so they
+sort last in **both** directions, while a *measured* zero sorts as the number it
+is — and pins that in its own checks. If you consume this subject, the question
+to ask of every numeric path is not "do I handle null?" but "does null get to
+pretend it is a number here?".
+
 **Running containers only.** A stopped container's stats call still answers
 `200`, with an all-empty body; published naively that is a row reading "0% CPU,
 0 bytes" for something that is not running at all. It is omitted instead, and
