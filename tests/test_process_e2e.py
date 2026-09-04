@@ -19,6 +19,7 @@ import signal
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 
 import pytest
 
@@ -59,8 +60,8 @@ def _client_config(endpoint: str) -> zenoh.Config:
     return conf
 
 
-@pytest.fixture
-def responder(fake_docker_env):
+@contextmanager
+def _spawn(fake_docker_env, *extra_args):
     """The console script, listening on a free port, with a unique realm."""
     port = _free_port()
     endpoint = f"tcp/127.0.0.1:{port}"
@@ -80,6 +81,7 @@ def responder(fake_docker_env):
             "peer",
             "--listen",
             endpoint,
+            *extra_args,
         ],
         env=fake_docker_env,
         stdout=subprocess.PIPE,
@@ -109,6 +111,18 @@ def responder(fake_docker_env):
         if proc.poll() is None:
             proc.kill()
             proc.communicate(timeout=30)
+
+
+@pytest.fixture
+def responder(fake_docker_env):
+    with _spawn(fake_docker_env) as spawned:
+        yield spawned
+
+
+@pytest.fixture
+def stats_responder(fake_docker_env):
+    with _spawn(fake_docker_env, "--publish-stats", "*", "--stats-interval-s", "0.2") as spawned:
+        yield spawned
 
 
 def test_the_spawned_process_answers_rpc(responder):
@@ -188,3 +202,38 @@ def test_sigterm_retracts_the_liveliness_tokens(responder):
     # go by different routes (declare_liveliness's context manager exit, and
     # serve_rpc's token dropped on session close).
     assert set(deletes) == {source_token, interface_token}, deletes
+
+
+def test_the_spawned_process_publishes_container_stats(stats_responder):
+    """The whole publish path in the real process: subject registration, QoS
+    derived from the key, enclose, and a real zenoh session.
+
+    The fake engine lists no containers, so the sample is empty -- which is the
+    point. It proves the message reaches a subscriber decodable, without
+    needing a daemon to have anything running on it.
+    """
+    from keelson_interface_docker.interfaces import ContainerHostStats
+    from keelson_interface_docker.stats_publisher import SUBJECT
+
+    _proc, endpoint, realm = stats_responder
+    key = keelson.construct_pubsub_key(realm, ENTITY, SUBJECT, SOURCE)
+
+    received = []
+    with zenoh.open(_client_config(endpoint)) as session:
+        session.declare_subscriber(key, lambda sample: received.append(sample.payload.to_bytes()))
+        deadline = time.monotonic() + STARTUP_TIMEOUT_S
+        while time.monotonic() < deadline and len(received) < 2:
+            time.sleep(0.1)
+
+    assert len(received) >= 2, "no stats samples arrived"
+
+    messages = []
+    for payload in received[:2]:
+        _r, _e, inner = keelson.uncover(payload)
+        message = ContainerHostStats()
+        message.ParseFromString(inner)
+        messages.append(message)
+
+    # Every tick is a sample: consecutive sequences, not a suppressed repeat.
+    assert messages[1].sequence == messages[0].sequence + 1
+    assert all(m.HasField("observed_at") for m in messages)

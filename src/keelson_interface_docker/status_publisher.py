@@ -33,7 +33,7 @@ import keelson
 from keelson.scaffolding import declare_publisher
 
 from . import model
-from .interfaces.ContainerControl_pb2 import ContainerHostStatus, StatusTrigger
+from .interfaces import ContainerHostStatus, StatusTrigger
 
 logger = logging.getLogger("keelson-interface-docker.status")
 

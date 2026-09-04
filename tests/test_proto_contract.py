@@ -199,6 +199,138 @@ class TestSubjectRegistration:
         assert decoded.HasField("observed_at")
 
 
+class TestPublishedStats:
+    """The utilisation half. Pinned like the rest, plus one thing the other
+    messages do not need: which fields are allowed to be ABSENT."""
+
+    def test_container_resource_usage_field_numbers_are_pinned(self):
+        from keelson_interface_docker.interfaces import ContainerResourceUsage
+
+        assert field_numbers(ContainerResourceUsage) == {
+            "name": 1,
+            "id": 2,
+            "cpu_load_pct": 3,
+            "online_cpus": 4,
+            "memory_used_bytes": 5,
+            "memory_limit_bytes": 6,
+            "memory_used_pct": 7,
+            "network_rx_bytes": 8,
+            "network_tx_bytes": 9,
+            "network_rx_bytes_per_second": 10,
+            "network_tx_bytes_per_second": 11,
+            "block_read_bytes": 12,
+            "block_write_bytes": 13,
+            "block_read_bytes_per_second": 14,
+            "block_write_bytes_per_second": 15,
+            "pids_current": 16,
+            "pids_limit": 17,
+            "cpu_allocation_cores": 18,
+            "cpu_shares": 19,
+            "cpuset_cpus": 20,
+            "cpu_throttled_periods": 21,
+            "cpu_throttled_time_ns": 22,
+            "sample_window_s": 23,
+        }
+
+    def test_container_host_stats_field_numbers_are_pinned(self):
+        from keelson_interface_docker.interfaces import ContainerHostStats
+
+        assert field_numbers(ContainerHostStats) == {
+            "containers": 1,
+            "observed_at": 2,
+            "sequence": 3,
+        }
+
+    def test_the_first_two_numbers_match_the_published_state(self):
+        # Same reason ContainerHostStatus lines up with ListContainersResponse:
+        # the two carry the same two things, and a reader diffing them should
+        # see them line up rather than wonder what the difference means.
+        from keelson_interface_docker.interfaces import (
+            ContainerHostStats,
+            ContainerHostStatus,
+        )
+
+        stats = field_numbers(ContainerHostStats)
+        status = field_numbers(ContainerHostStatus)
+        for name in ("containers", "observed_at"):
+            assert stats[name] == status[name]
+
+    def test_there_is_no_trigger_because_every_sample_is_a_change(self):
+        from keelson_interface_docker.interfaces import ContainerHostStats
+
+        assert "trigger" not in field_numbers(ContainerHostStats)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "cpu_load_pct",
+            "memory_limit_bytes",
+            "memory_used_pct",
+            "network_rx_bytes",
+            "network_tx_bytes",
+            "network_rx_bytes_per_second",
+            "network_tx_bytes_per_second",
+            "block_read_bytes",
+            "block_write_bytes",
+            "block_read_bytes_per_second",
+            "block_write_bytes_per_second",
+            "online_cpus",
+            "cpu_throttled_periods",
+            "cpu_throttled_time_ns",
+            "pids_limit",
+            "cpu_allocation_cores",
+            "cpu_shares",
+            "sample_window_s",
+        ],
+    )
+    def test_the_unknowable_fields_keep_explicit_presence(self, field):
+        # THE TEST THAT STOPS A TIDY-UP FROM CHANGING THE MEANING. Dropping
+        # `optional` compiles, passes every other test, and silently converts
+        # "no reading yet" into "zero" -- a flat green line drawn through a gap.
+        # Every field here has a case where nobody can know the value: a first
+        # sample, a restart that zeroed the counters, a host-networked
+        # container, an unconstrained one.
+        from keelson_interface_docker.interfaces import ContainerResourceUsage
+
+        assert ContainerResourceUsage.DESCRIPTOR.fields_by_name[field].has_presence
+
+    def test_the_shipped_yaml_names_this_payload(self):
+        from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
+
+        keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
+        assert keelson.is_subject_well_known("container_stats")
+        assert (
+            keelson.get_subject_schema("container_stats")
+            == f"{DESCRIPTOR.package}.ContainerHostStats"
+        )
+        assert (
+            keelson.construct_pubsub_key("rise", "crab", "container_stats", "big")
+            == "rise/@v0/crab/pubsub/container_stats/big"
+        )
+
+    def test_the_descriptor_set_can_actually_decode_the_payload(self):
+        from keelson_interface_docker.app import PROTO_DESCRIPTOR_SET, SUBJECTS_YAML
+        from keelson_interface_docker.interfaces import ContainerHostStats
+
+        keelson.add_well_known_subjects_and_proto_definitions(SUBJECTS_YAML, PROTO_DESCRIPTOR_SET)
+        msg = ContainerHostStats(sequence=7)
+        msg.observed_at.FromNanoseconds(1_700_000_000_000_000_000)
+        msg.containers.add(name="nginx", cpu_load_pct=250.5)
+
+        decoded = keelson.decode_protobuf_payload_from_type_name(
+            msg.SerializeToString(), f"{DESCRIPTOR.package}.ContainerHostStats"
+        )
+        assert decoded.containers[0].name == "nginx"
+        assert decoded.containers[0].cpu_load_pct == pytest.approx(250.5)
+        assert decoded.sequence == 7
+
+    def test_adding_it_did_not_add_a_sixth_procedure(self):
+        # The second published message, and the same guarantee: publishing is
+        # not an interface change. Still five.
+        service = DESCRIPTOR.services_by_name["ContainerControl"]
+        assert [m.name for m in service.methods] == PROCEDURES
+
+
 class TestRegistriesShipInsideThePackage:
     """package-data omissions are invisible in a dev checkout, where
     interfaces/ still exists at the repo root, and a startup FileNotFoundError

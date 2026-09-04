@@ -213,3 +213,63 @@ class ContainerHostStatus(_message.Message):
     trigger: StatusTrigger
     sequence: int
     def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ..., trigger: _Optional[_Union[StatusTrigger, str]] = ..., sequence: _Optional[int] = ...) -> None: ...
+
+class ContainerResourceUsage(_message.Message):
+    __slots__ = ("name", "id", "cpu_load_pct", "online_cpus", "memory_used_bytes", "memory_limit_bytes", "memory_used_pct", "network_rx_bytes", "network_tx_bytes", "network_rx_bytes_per_second", "network_tx_bytes_per_second", "block_read_bytes", "block_write_bytes", "block_read_bytes_per_second", "block_write_bytes_per_second", "pids_current", "pids_limit", "cpu_allocation_cores", "cpu_shares", "cpuset_cpus", "cpu_throttled_periods", "cpu_throttled_time_ns", "sample_window_s")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CPU_LOAD_PCT_FIELD_NUMBER: _ClassVar[int]
+    ONLINE_CPUS_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_USED_BYTES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_LIMIT_BYTES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_USED_PCT_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_RX_BYTES_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_TX_BYTES_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_RX_BYTES_PER_SECOND_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_TX_BYTES_PER_SECOND_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_READ_BYTES_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_WRITE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_READ_BYTES_PER_SECOND_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_WRITE_BYTES_PER_SECOND_FIELD_NUMBER: _ClassVar[int]
+    PIDS_CURRENT_FIELD_NUMBER: _ClassVar[int]
+    PIDS_LIMIT_FIELD_NUMBER: _ClassVar[int]
+    CPU_ALLOCATION_CORES_FIELD_NUMBER: _ClassVar[int]
+    CPU_SHARES_FIELD_NUMBER: _ClassVar[int]
+    CPUSET_CPUS_FIELD_NUMBER: _ClassVar[int]
+    CPU_THROTTLED_PERIODS_FIELD_NUMBER: _ClassVar[int]
+    CPU_THROTTLED_TIME_NS_FIELD_NUMBER: _ClassVar[int]
+    SAMPLE_WINDOW_S_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    id: str
+    cpu_load_pct: float
+    online_cpus: int
+    memory_used_bytes: int
+    memory_limit_bytes: int
+    memory_used_pct: float
+    network_rx_bytes: int
+    network_tx_bytes: int
+    network_rx_bytes_per_second: float
+    network_tx_bytes_per_second: float
+    block_read_bytes: int
+    block_write_bytes: int
+    block_read_bytes_per_second: float
+    block_write_bytes_per_second: float
+    pids_current: int
+    pids_limit: int
+    cpu_allocation_cores: float
+    cpu_shares: int
+    cpuset_cpus: str
+    cpu_throttled_periods: int
+    cpu_throttled_time_ns: int
+    sample_window_s: float
+    def __init__(self, name: _Optional[str] = ..., id: _Optional[str] = ..., cpu_load_pct: _Optional[float] = ..., online_cpus: _Optional[int] = ..., memory_used_bytes: _Optional[int] = ..., memory_limit_bytes: _Optional[int] = ..., memory_used_pct: _Optional[float] = ..., network_rx_bytes: _Optional[int] = ..., network_tx_bytes: _Optional[int] = ..., network_rx_bytes_per_second: _Optional[float] = ..., network_tx_bytes_per_second: _Optional[float] = ..., block_read_bytes: _Optional[int] = ..., block_write_bytes: _Optional[int] = ..., block_read_bytes_per_second: _Optional[float] = ..., block_write_bytes_per_second: _Optional[float] = ..., pids_current: _Optional[int] = ..., pids_limit: _Optional[int] = ..., cpu_allocation_cores: _Optional[float] = ..., cpu_shares: _Optional[int] = ..., cpuset_cpus: _Optional[str] = ..., cpu_throttled_periods: _Optional[int] = ..., cpu_throttled_time_ns: _Optional[int] = ..., sample_window_s: _Optional[float] = ...) -> None: ...
+
+class ContainerHostStats(_message.Message):
+    __slots__ = ("containers", "observed_at", "sequence")
+    CONTAINERS_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_AT_FIELD_NUMBER: _ClassVar[int]
+    SEQUENCE_FIELD_NUMBER: _ClassVar[int]
+    containers: _containers.RepeatedCompositeFieldContainer[ContainerResourceUsage]
+    observed_at: _timestamp_pb2.Timestamp
+    sequence: int
+    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerResourceUsage, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., sequence: _Optional[int] = ...) -> None: ...

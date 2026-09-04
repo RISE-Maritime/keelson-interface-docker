@@ -18,6 +18,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from .interfaces import (
     ContainerInfo,
+    ContainerResourceUsage,
     ContainerState,
     HealthStatus,
     LogLine,
@@ -174,6 +175,327 @@ def build_container_info(snapshot: ContainerSnapshot, *, controllable: bool) -> 
         info.exit_code = int(state.get("ExitCode") or 0)
 
     return info
+
+
+# -----------------------------------------------------------------------------
+# Resource utilisation
+# -----------------------------------------------------------------------------
+#
+# All of it derived here rather than in the publisher, for the reason the rest
+# of this module exists: no docker, no zenoh, so the arithmetic is testable with
+# plain dictionaries and the two cases that actually bite -- a first sample with
+# nothing to difference against, and counters that went backwards -- are unit
+# tests rather than something you wait for a container to restart to see.
+
+
+@dataclass(frozen=True)
+class StatsSample:
+    """The counters from one reading, kept so the next one can be differenced.
+
+    Every field is cumulative-since-container-start except ``monotonic_s``,
+    which is when we read them. The window is measured, not assumed from the
+    configured interval: a tick the daemon was slow to answer produces a wider
+    one, and dividing by the nominal interval would report a rate that never
+    happened.
+    """
+
+    cpu_total_ns: int
+    system_cpu_ns: int
+    #: None for a container on the host network stack, which has no interfaces.
+    rx_bytes: int | None
+    tx_bytes: int | None
+    #: None when the runtime reports no block accounting.
+    block_read_bytes: int | None
+    block_write_bytes: int | None
+    monotonic_s: float
+
+
+def _num(value, default=0):
+    """Docker's stats payload is JSON from a Go struct: a field can be absent, be
+    null, or -- on a container that is not running -- be present with the whole
+    parent object empty. All three mean "no reading"."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return value
+
+
+def _network_totals(raw: dict) -> tuple[int | None, int | None]:
+    """Summed rx/tx across interfaces, or ``(None, None)``.
+
+    A container sharing the host's network namespace (``network_mode: host``)
+    has no interface of its own, and the Engine omits the `networks` key rather
+    than reporting zeroes. Passing zeroes on would claim the container sends
+    nothing, which is the opposite of true -- it is using the host's NIC, whose
+    counters belong to the host and are published by a host telemetry agent.
+    """
+    networks = raw.get("networks")
+    if not isinstance(networks, dict) or not networks:
+        return None, None
+    rx = tx = 0
+    for interface in networks.values():
+        if isinstance(interface, dict):
+            rx += int(_num(interface.get("rx_bytes")))
+            tx += int(_num(interface.get("tx_bytes")))
+    return rx, tx
+
+
+def _block_totals(raw: dict) -> tuple[int | None, int | None]:
+    """Summed block-device bytes read and written, or ``(None, None)``.
+
+    ``io_service_bytes_recursive`` is a list of ``{major, minor, op, value}``
+    per device and operation. The op is spelled "read"/"write" under cgroup v2
+    and "Read"/"Write" under v1, so both sides are lowercased rather than the
+    payload trusted to be one or the other.
+
+    None when the runtime reported no block accounting at all -- some storage
+    drivers report none, and the Engine sends the key as null. "Wrote nothing"
+    and "nobody counted" are different facts, and flattening the second into a
+    zero is the mistake this whole message is written to avoid.
+    """
+    entries = (raw.get("blkio_stats") or {}).get("io_service_bytes_recursive")
+    if not entries:
+        return None, None
+    read = write = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        op = str(entry.get("op", "")).lower()
+        value = int(_num(entry.get("value")))
+        if op == "read":
+            read += value
+        elif op == "write":
+            write += value
+    return read, write
+
+
+def _memory_working_set(memory: dict) -> int:
+    """Usage minus reclaimable file cache -- what ``docker stats`` shows.
+
+    Raw ``usage`` includes page cache the kernel would drop the moment anything
+    asked for the memory, so a container that has merely read a large file reads
+    as one leaking. cgroup v2 names the reclaimable part `inactive_file`, v1
+    `total_inactive_file`; a runtime reporting neither falls back to raw usage,
+    which is wrong but visibly wrong rather than absent.
+    """
+    usage = int(_num(memory.get("usage")))
+    detail = memory.get("stats")
+    if isinstance(detail, dict):
+        # v1's key is tried FIRST, and the value is required to be below usage,
+        # exactly as docker's own CLI does it: a v1 host reports both spellings
+        # and the `total_` one is the correct subtrahend. The guard is not
+        # defensive tidiness -- it is what makes a nonsensical pair fall back to
+        # raw usage instead of producing a clamped zero that looks like an idle
+        # container.
+        for key in ("total_inactive_file", "inactive_file"):
+            value = detail.get(key)
+            if value is not None and 0 <= int(_num(value)) < usage:
+                return usage - int(_num(value))
+    return usage
+
+
+def _cpu_allocation_cores(host_config: dict) -> float | None:
+    """Cores the container may use, or None when unconstrained.
+
+    Two spellings of the same constraint: `--cpus` arrives as NanoCpus, while
+    the older `--cpu-quota`/`--cpu-period` pair arrives as itself. Compose
+    writes one or the other depending on the key used, so both are read.
+    """
+    nano = _num(host_config.get("NanoCpus"))
+    if nano > 0:
+        return nano / 1e9
+    quota = _num(host_config.get("CpuQuota"))
+    period = _num(host_config.get("CpuPeriod"))
+    if quota > 0 and period > 0:
+        return quota / period
+    return None
+
+
+def read_stats_sample(raw: dict, *, monotonic_s: float) -> StatsSample | None:
+    """The counters worth keeping from one reading, or None if there are none.
+
+    A container that stopped between the listing and the stats call still
+    answers, with `cpu_stats` present but zeroed. Differencing against that
+    would report a negative delta on the next sample; returning None means the
+    next sample is treated as a first one instead.
+    """
+    if not isinstance(raw, dict):
+        return None
+    cpu = raw.get("cpu_stats") or {}
+    total = int(_num((cpu.get("cpu_usage") or {}).get("total_usage")))
+    system = int(_num(cpu.get("system_cpu_usage")))
+    # Both guards matter and neither subsumes the other: a stopped container's
+    # body has zeroes throughout, while a live one always has a host-wide system
+    # total. Without a system total there is nothing to difference against next
+    # tick, so there is no sample worth keeping.
+    if total <= 0 or system <= 0:
+        return None
+    rx, tx = _network_totals(raw)
+    block_read, block_write = _block_totals(raw)
+    return StatsSample(
+        cpu_total_ns=total,
+        system_cpu_ns=system,
+        rx_bytes=rx,
+        tx_bytes=tx,
+        block_read_bytes=block_read,
+        block_write_bytes=block_write,
+        monotonic_s=monotonic_s,
+    )
+
+
+def _rate(current: int, previous: int, elapsed_s: float) -> float | None:
+    """Bytes per second, or None when the pair cannot support the claim.
+
+    A negative delta means the counters reset under us -- the container was
+    recreated, or restarted in place -- and the honest answer there is no
+    answer, not a spike the size of the whole counter.
+    """
+    if elapsed_s <= 0:
+        return None
+    delta = current - previous
+    if delta < 0:
+        return None
+    return delta / elapsed_s
+
+
+def build_resource_usage(
+    snapshot: ContainerSnapshot,
+    raw: dict,
+    previous: StatsSample | None,
+    *,
+    monotonic_s: float,
+) -> tuple[ContainerResourceUsage | None, StatsSample | None]:
+    """One container's utilisation, plus the sample to difference the next one against.
+
+    Returns ``(usage, sample)``, or ``(None, None)`` when the reading carries no
+    measurement at all.
+
+    That second case is a container that stopped between the listing and its
+    stats call. The Engine answers such a call with 200 and an all-empty body --
+    no `system_cpu_usage`, empty `memory_stats` -- and building a row from it
+    would publish "0% CPU, 0 bytes" for a container whose truth is "not
+    running". Omitting it is the honest answer; container_status carries the
+    stopped ones.
+
+    UNSET IS NOT ZERO. Everything derived from a pair of readings -- the CPU
+    percentage and all four rates -- is left unset when there is no usable
+    predecessor. That is the first sample after this process started or after
+    the container appeared, and any sample whose counters went backwards. A zero
+    there would draw a flat line through a gap and read as an idle container.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    sample = read_stats_sample(raw, monotonic_s=monotonic_s)
+    if sample is None:
+        return None, None
+
+    host_config = (snapshot.attrs or {}).get("HostConfig") or {}
+    cpu_stats = raw.get("cpu_stats") or {}
+    cpu_usage = cpu_stats.get("cpu_usage") or {}
+    memory = raw.get("memory_stats") or {}
+    pids = raw.get("pids_stats") or {}
+    throttling = cpu_stats.get("throttling_data") or {}
+
+    usage = ContainerResourceUsage(
+        name=snapshot.name,
+        id=snapshot.id,
+        memory_used_bytes=_memory_working_set(memory),
+        pids_current=int(_num(pids.get("current"))),
+        cpuset_cpus=str(host_config.get("CpusetCpus") or ""),
+    )
+
+    # Set whenever the runtime reports them AT ALL, which means a healthy
+    # container publishes an explicit zero rather than nothing. That is the
+    # entire reason these two are `optional`: zero throttling is the normal
+    # reading, so a plain proto3 scalar would drop them from the wire on exactly
+    # the containers that are fine, and a consumer decoding a hard 0 could not
+    # tell "measured, never throttled" from "not reported".
+    if isinstance(throttling, dict) and throttling:
+        usage.cpu_throttled_periods = int(_num(throttling.get("throttled_periods")))
+        usage.cpu_throttled_time_ns = int(_num(throttling.get("throttled_time")))
+
+    online = int(_num(cpu_stats.get("online_cpus")))
+    if online <= 0:
+        online = len(cpu_usage.get("percpu_usage") or ()) or 0
+    if online > 0:
+        # Left unset rather than zeroed when the runtime reports neither a core
+        # count nor a per-core list: it is the divisor a consumer needs to
+        # normalise cpu_load_pct, and a zero denominator fails silently.
+        usage.online_cpus = online
+
+    # The memory ceiling is read from the configuration, not from the counters:
+    # an unconstrained container's cgroup limit IS the host's total memory, and
+    # reporting that as "the limit" makes every container on a 32 GiB box look
+    # comfortably within bounds it does not have.
+    # Two fields, two sources, neither inferred from the other.
+    #
+    # The percentage divides by `memory_stats.limit`, which the Engine sets to
+    # the configured limit when there is one and to the host's total memory when
+    # there is not -- so it is the same number `docker stats` prints in MEM%,
+    # and it is answerable for every container.
+    #
+    # The LIMIT field is read from the configuration instead, and only when one
+    # was actually set. Passing the counter's limit through would tell an
+    # operator every container on this box is "limited to 31 GiB", which is a
+    # limit nothing will ever enforce.
+    limit = int(_num(memory.get("limit")))
+    if limit > 0:
+        usage.memory_used_pct = usage.memory_used_bytes / limit * 100.0
+    configured_memory = int(_num(host_config.get("Memory")))
+    if configured_memory > 0:
+        usage.memory_limit_bytes = limit or configured_memory
+
+    block_read, block_write = _block_totals(raw)
+    if block_read is not None and block_write is not None:
+        usage.block_read_bytes = block_read
+        usage.block_write_bytes = block_write
+
+    rx, tx = _network_totals(raw)
+    if rx is not None and tx is not None:
+        usage.network_rx_bytes = rx
+        usage.network_tx_bytes = tx
+
+    pids_limit = int(_num(pids.get("limit")))
+    if pids_limit > 0:
+        usage.pids_limit = pids_limit
+
+    allocation = _cpu_allocation_cores(host_config)
+    if allocation is not None:
+        usage.cpu_allocation_cores = allocation
+    shares = int(_num(host_config.get("CpuShares")))
+    if shares > 0:
+        usage.cpu_shares = shares
+
+    if previous is not None:
+        elapsed = sample.monotonic_s - previous.monotonic_s
+        if elapsed > 0:
+            usage.sample_window_s = elapsed
+
+        cpu_delta = sample.cpu_total_ns - previous.cpu_total_ns
+        system_delta = sample.system_cpu_ns - previous.system_cpu_ns
+        # system_cpu_usage is the host's total busy time across all cores, so
+        # the ratio is already per-host; multiplying by the core count converts
+        # it to the "percent of one core" convention `docker stats` uses.
+        if cpu_delta >= 0 and system_delta > 0 and online > 0:
+            usage.cpu_load_pct = cpu_delta / system_delta * online * 100.0
+
+        if block_read is not None and previous.block_read_bytes is not None:
+            read_rate = _rate(block_read, previous.block_read_bytes, elapsed)
+            if read_rate is not None:
+                usage.block_read_bytes_per_second = read_rate
+        if block_write is not None and previous.block_write_bytes is not None:
+            write_rate = _rate(block_write, previous.block_write_bytes, elapsed)
+            if write_rate is not None:
+                usage.block_write_bytes_per_second = write_rate
+
+        if rx is not None and previous.rx_bytes is not None:
+            rx_rate = _rate(rx, previous.rx_bytes, elapsed)
+            if rx_rate is not None:
+                usage.network_rx_bytes_per_second = rx_rate
+        if tx is not None and previous.tx_bytes is not None:
+            tx_rate = _rate(tx, previous.tx_bytes, elapsed)
+            if tx_rate is not None:
+                usage.network_tx_bytes_per_second = tx_rate
+
+    return usage, sample
 
 
 def matches_any(name: str, globs: Iterable[str]) -> bool:

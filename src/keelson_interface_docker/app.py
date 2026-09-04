@@ -30,7 +30,7 @@ from keelson.scaffolding import (
     setup_logging,
 )
 
-from . import handlers, logs_follower, selfid, status_publisher
+from . import handlers, logs_follower, selfid, stats_publisher, status_publisher
 from .backend import BackendError, DockerBackend, snapshots_by_label
 from .guard import ControlGuard
 from .interfaces import INTERFACE, VERSION
@@ -125,6 +125,34 @@ def build_parser() -> argparse.ArgumentParser:
             "Republish unchanged state at most this often. Zenoh pub/sub does "
             "not backfill, so this bounds how stale a late subscriber's first "
             "value is."
+        ),
+    )
+
+    stats = parser.add_argument_group("resource stats (off by default)")
+    stats.add_argument(
+        "--publish-stats",
+        metavar="GLOB",
+        action="append",
+        default=[],
+        help=(
+            "Publish per-container CPU, memory, network, block I/O and CFS "
+            "throttling as the 'container_stats' subject, for container names "
+            "matching this glob; repeatable. Off entirely when unset. OFF BY "
+            "DEFAULT, unlike --publish-status: that one republishes bytes "
+            "list() already hands to any bus participant who asks, while this "
+            "is new continuous telemetry -- every tick is a sample, by "
+            "definition -- on a link that also carries navigation data."
+        ),
+    )
+    stats.add_argument(
+        "--stats-interval-s",
+        type=float,
+        default=10.0,
+        help=(
+            "How often every matching running container is sampled, and the "
+            "window every rate on the wire is averaged over. Longer than "
+            "--status-interval-s on purpose: a state change is news, a "
+            "utilisation sample is a series."
         ),
     )
 
@@ -255,6 +283,8 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
     published_subjects = []
     if args.publish_status:
         published_subjects.append(status_publisher.SUBJECT)
+    if args.publish_stats:
+        published_subjects.append(stats_publisher.SUBJECT)
     if args.follow_logs:
         published_subjects.append(logs_follower.SUBJECT)
 
@@ -304,6 +334,18 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
                         source_id=args.source_id,
                         interval_s=args.status_interval_s,
                         heartbeat_s=args.status_heartbeat_s,
+                    )
+                )
+            if args.publish_stats:
+                stack.enter_context(
+                    stats_publisher.ContainerStatsPublisher(
+                        ctx.backend,
+                        session,
+                        base_path=args.realm,
+                        entity_id=args.entity_id,
+                        source_id=args.source_id,
+                        globs=tuple(args.publish_stats),
+                        interval_s=args.stats_interval_s,
                     )
                 )
             if args.follow_logs:

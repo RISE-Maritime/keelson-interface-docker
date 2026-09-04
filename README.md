@@ -249,6 +249,8 @@ required. Beyond those:
 | `--default-tail-lines` | 200 | Used when a request asks for 0 lines. |
 | `--max-tail-lines` | 5000 | Requests above this are clamped, not rejected. |
 | `--max-log-bytes` | 1000000 | Oldest lines are dropped to fit; `truncated` is set. |
+| `--publish-stats GLOB` | — | Container name glob to sample resource use for; repeatable. Off entirely when unset. |
+| `--stats-interval-s` | 10.0 | Sampling interval, and the window every rate is averaged over. |
 
 ## Calling it
 
@@ -470,10 +472,11 @@ indistinguishable from a quiet one, a wedged publisher and a dead host. A
 whole-host snapshot expresses removal by omission, and "that container is gone"
 is exactly what an operator needs to see.
 
-**A recorder needs two extra files.** The subject and its payload are registered
-locally at startup (`interfaces/subjects.yaml` plus the generated
+**A recorder needs two extra files.** This subject and its payload are
+registered locally at startup (`interfaces/subjects.yaml` plus the generated
 `ContainerControl.desc`), the same way this repo registers its interface, so
-`keelson2mcap` must be given the same pair or it writes an undecodable blob:
+`keelson2mcap` must be given the same pair or it writes an undecodable blob.
+The same two files cover `container_stats` below, so this is one flag, not two:
 
 ```
 --extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc
@@ -481,29 +484,117 @@ locally at startup (`interfaces/subjects.yaml` plus the generated
 
 It is *not* a sixth procedure — see below.
 
-### It does not publish container or host **resource** stats
+### It publishes container **resource** stats, opt-in
 
-Logs and state were different cases, and the difference is the whole reason
-those were done and this was not: `log_message` → `foxglove.Log` already existed
-upstream with a QoS profile assigned, and container state is the literal content
-of an existing procedure's response. Resource metrics are neither.
+`container_stats` → `keelson.interfaces.container_control.ContainerHostStats`,
+on `{realm}/@v0/{entity}/pubsub/container_stats/{source_id}` — **one key per
+host**, carrying one `ContainerResourceUsage` per sampled container: CPU
+percentage and core count, memory working set and percentage, network and block
+I/O totals with their per-second rates, PID count, the configured allocation
+(`--cpus`, `--cpu-shares`, `--cpuset-cpus`, `--memory`), and CFS throttling.
 
-`docker stats`-style telemetry (CPU, memory, restart history) is not on the bus,
-for three independent reasons:
+Controlled by `--publish-stats GLOB` (**off entirely when unset**, repeatable)
+and `--stats-interval-s` (10.0).
 
-1. **No subject fits.** The nearest misses in keelson's `subjects.yaml` —
-   `sensor_status`, `network_status`, `device_uptime_duration` — are all about a
-   *device*. It would need new upstream subjects and payload types.
-2. **It could not be a sixth procedure.** Continuous streams are pub/sub, not
-   RPC; and adding a procedure to a published interface version is a breaking
-   change requiring `v2`, because a consumer cannot tell "this implementor
-   predates the method" from "this implementor is unreachable" — zenoh returns
-   no reply for both. This is why `container_status` above is a *message* and a
-   subject, not a procedure: adding a message changes no existing message's wire
-   format and leaves `service ContainerControl` at five procedures.
-3. **The fleet already answers it, off-bus and on purpose.** netdata and
-   portainer run per platform. Putting per-container stats on the bus would buy
-   a worse version of a deployed tool, on the link that carries navigation data.
+**Off by default, unlike `--publish-status`, and the difference is the point.**
+That one republishes precisely the bytes `list` already hands to any bus
+participant who asks, only on time. This is *new* continuous telemetry: every
+tick is a sample by definition, so it is a fixed-rate load on a link that also
+carries navigation data. An operator who can reach netdata or portainer on the
+host should leave it off.
+
+**What it buys where those cannot reach.** netdata and portainer are still
+better at this, on a machine you can open a browser to. What they cannot do is
+put utilisation *in the MCAP recording*, on the same clock as the vessel data —
+so "the connector dropped out at 14:03" can be laid next to "that container was
+CFS-throttled at 14:03", after the fact, on a host nobody can reach any more.
+That is the case this is for, and the reason it is opt-in rather than absent.
+
+**Every tick publishes; there is no change detection.** The one place this
+departs from `container_status`, and not an oversight. Container state is a step
+function, so suppressing repeats there is what lets a subscriber trust that a
+message means something moved. Utilisation changes on every sample by
+definition: a series with its repeats suppressed is a series with holes in it,
+and a consumer could not tell a quiet container from a stalled publisher.
+
+**Unset is not zero.** Everything derived from a *pair* of readings — the CPU
+percentage and all four byte rates — is absent, not zero, when there is no
+usable predecessor. Three ordinary cases produce that:
+
+- the **first sample** for a container, which has nothing to difference against;
+- a **restart**, which zeroes the cgroup counters; one tick unset, then it
+  resumes. (Keyed by container id, so a `--force-recreate` — same name, fresh
+  counters — is the same story rather than a spike that never happened.)
+- a **host-networked container**, whose four network fields are absent
+  permanently: it has no interface of its own, and the Engine omits the
+  counters rather than zeroing them. Reporting 0 would claim it moves no
+  traffic, which is the opposite of true.
+
+A dashboard cannot tell 0.0 from "no reading" — it draws a flat line through the
+gap and an alert rule reads it as healthy — which is why every such field is
+`optional` in the proto and why `tests/test_proto_contract.py` pins that
+presence field by field.
+
+**Running containers only.** A stopped container's stats call still answers
+`200`, with an all-empty body; published naively that is a row reading "0% CPU,
+0 bytes" for something that is not running at all. It is omitted instead, and
+`container_status` — which carries the complete set including stopped ones — is
+where absence means *gone*.
+
+**Configured limits come from the container's configuration, not the counters.**
+The Engine reports the host's total memory as the `limit` of an unconstrained
+container, so `memory_limit_bytes` is set only when a limit was actually
+configured. `memory_used_pct` still divides by the reported limit either way,
+which is the number `docker stats` prints in its MEM% column.
+
+That last part has a consequence a consumer must handle: **`memory_used_pct` is
+of the limit when there is one and of host total when there is not**, so what it
+is a percentage *of* depends on whether `memory_limit_bytes` is present. Label
+the two cases differently ("of limit" / "of host") or a fleet table shows two
+incomparable percentages in one column. It is kept because dropping it would
+lose the docker-comparable figure for the unconstrained containers that are the
+overwhelming majority — but it is the one place here where one field's presence
+changes another's meaning, which the throttling counters are `optional`
+specifically to avoid.
+
+**One sweep, one thread, one-shot samples.** `stats(stream=False,
+one_shot=True)`: without `one_shot` the daemon sleeps a full sampling cycle
+before answering — about a second *per container* — which is why `docker stats
+--no-stream` over eight containers takes two seconds. One-shot reads the cgroup
+files and returns; eight containers sweep in about a tenth of a second. The
+price is that `precpu_stats` comes back zeroed, which is why the differencing is
+done here. The publisher warns if a sweep exceeds half the interval.
+
+**It is not a sixth procedure**, for the reason `container_status` is not:
+continuous streams are pub/sub, not RPC, and adding a procedure to a published
+interface version is a breaking change requiring `v2` — a consumer cannot tell
+"this implementor predates the method" from "this implementor is unreachable",
+because zenoh returns no reply for both. Adding a message changes no existing
+message's wire format and leaves `service ContainerControl` at five procedures.
+
+**The recorder needs the same two files as `container_status`** — one
+`--extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc`
+now covers both subjects.
+
+**Decoding it in JavaScript: do not "fix" the defaults option.** protobufjs
+compiles a proto3 `optional` field to a synthetic oneof, and `toObject`'s
+`defaults: true` does not populate oneof members — so presence survives
+`defaults: true` intact, and the defensive-looking move of setting
+`defaults: false` because "this message is mostly optional" is actively wrong.
+It changes nothing for the optional fields and turns the five non-optional ones
+into `undefined` whenever they hold their proto3 default, where `0` resident
+bytes and an empty `cpuset_cpus` are both real readings. Verified against live
+payloads by the crowsnest side. (`ts-proto` differs from protobufjs on
+timestamps — a `Date` rather than `{seconds, nanos}` — but that is a rendering
+detail; this one silently loses data.)
+
+**Host-level totals are not here, deliberately.** Summing the containers does
+not give you the host: non-containerised processes are outside the sum, so "is
+this host oversubscribed?" is not answerable from this subject and is not meant
+to be. Those figures come from a host telemetry agent — `keelson-connector-pc`
+publishes `cpu_load_pct`, `memory_total_bytes` and the rest of keelson's compute
+host telemetry block. Duplicating them into a container message is how two
+sources of truth start.
 
 ## Upstreaming this interface into keelson
 

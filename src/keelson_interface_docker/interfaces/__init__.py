@@ -17,7 +17,10 @@ descriptors.
 
 from .ContainerControl_pb2 import (
     ContainerActionResponse,
+    ContainerHostStats,
+    ContainerHostStatus,
     ContainerInfo,
+    ContainerResourceUsage,
     ContainerState,
     GetLogsRequest,
     GetLogsResponse,
@@ -30,6 +33,7 @@ from .ContainerControl_pb2 import (
     RestartContainerRequest,
     RestartPolicy,
     StartContainerRequest,
+    StatusTrigger,
     StopContainerRequest,
 )
 
@@ -42,7 +46,10 @@ __all__ = [
     "INTERFACE",
     "VERSION",
     "ContainerActionResponse",
+    "ContainerHostStats",
+    "ContainerHostStatus",
     "ContainerInfo",
+    "ContainerResourceUsage",
     "ContainerState",
     "GetLogsRequest",
     "GetLogsResponse",
@@ -55,5 +62,6 @@ __all__ = [
     "RestartContainerRequest",
     "RestartPolicy",
     "StartContainerRequest",
+    "StatusTrigger",
     "StopContainerRequest",
 ]

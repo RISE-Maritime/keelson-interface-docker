@@ -31,6 +31,32 @@ API_VERSION = "1.45"
 _VERSION_PREFIX = re.compile(r"^/v\d+\.\d+/")
 
 
+#: A real one-shot sample, trimmed. cgroup v2, so no `precpu_stats` and
+#: `inactive_file` rather than `total_inactive_file` -- which is what the
+#: responder actually receives.
+_STATS_SAMPLE = {
+    "read": "2026-09-04T06:44:12.592948781Z",
+    "cpu_stats": {
+        "cpu_usage": {"total_usage": 7_063_210_830_000},
+        "system_cpu_usage": 755_412_800_000_000,
+        "online_cpus": 16,
+        "throttling_data": {"periods": 0, "throttled_periods": 0, "throttled_time": 0},
+    },
+    "memory_stats": {
+        "usage": 26_820_608,
+        "stats": {"inactive_file": 151_552},
+        "limit": 33_364_172_800,
+    },
+    "pids_stats": {"current": 9, "limit": 34_676},
+    "blkio_stats": {
+        "io_service_bytes_recursive": [
+            {"major": 259, "minor": 2, "op": "read", "value": 16_474_112},
+            {"major": 259, "minor": 2, "op": "write", "value": 0},
+        ]
+    },
+}
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -56,6 +82,13 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path.endswith("/logs"):
             self._serve_logs(path)
+        elif path.endswith("/stats"):
+            # Answered explicitly rather than falling through to the `{}`
+            # default below. That default is not harmless here: an empty body
+            # is exactly what a STOPPED container returns, so the sweep would
+            # correctly drop every row and an end-to-end stats test would be
+            # green and vacuous.
+            self._send(_STATS_SAMPLE)
         elif path.endswith("_ping"):
             self.send_response(200)
             self.send_header("Api-Version", API_VERSION)

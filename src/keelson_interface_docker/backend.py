@@ -118,6 +118,35 @@ class DockerBackend:
         except (APIError, DockerException) as exc:
             raise self._translate(exc, "get container", name_or_id) from exc
 
+    def stats(self, name_or_id: str) -> dict:
+        """One instantaneous sample of a container's resource counters.
+
+        ``one_shot`` is the whole reason this is usable on an interval. Without
+        it the daemon takes two readings a second apart so it can hand back a
+        pre-computed delta, and that second is spent per container, serialised:
+        eight containers cost eight seconds, which does not fit inside any
+        sensible publish interval. With it the same eight return in under a
+        tenth of a second.
+
+        The trade is that ``precpu_stats`` comes back zeroed -- there is no
+        earlier reading for the daemon to have taken -- so the caller keeps the
+        previous sample and does the differencing itself. See
+        :func:`model.build_resource_usage`.
+
+        Through ``client.api`` rather than ``containers.get(id).stats(...)``,
+        unlike everything else in this class: the model-object route inspects
+        the container first, and :meth:`list` inspected every one of them moments
+        ago. That is one wasted round trip per container per tick, forever.
+
+        Returns the raw dictionary rather than a translated type: everything
+        that interprets it lives in :mod:`model`, which is kept free of both
+        docker and zenoh.
+        """
+        try:
+            return self.client.api.stats(name_or_id, stream=False, one_shot=True) or {}
+        except (APIError, DockerException) as exc:
+            raise self._translate(exc, "read stats", name_or_id) from exc
+
     def logs(
         self,
         name: str,

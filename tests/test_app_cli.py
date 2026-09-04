@@ -60,6 +60,12 @@ class TestArgumentValidation:
         for flag in ("--allow-control", "--allow", "--self-container-name"):
             assert flag in result.stdout
 
+    def test_help_lists_the_stats_flags(self):
+        result = run([APP, "--help"])
+        assert result.returncode == 0
+        for flag in ("--publish-stats", "--stats-interval-s"):
+            assert flag in result.stdout
+
 
 class TestSocketPreflight:
     def test_an_unreachable_socket_exits_with_actionable_advice(self):
