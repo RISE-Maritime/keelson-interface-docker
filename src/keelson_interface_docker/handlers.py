@@ -1,4 +1,4 @@
-"""The five ``container_control/v1`` procedures.
+"""The six ``container_control/v1`` procedures.
 
 Every handler replies exactly once on every path. That is the whole contract
 ``serve_rpc`` cannot enforce for us, and the thing the previous implementation
@@ -31,6 +31,8 @@ from .interfaces import (
     ListContainersResponse,
     LogStream,
     LogStreamSelector,
+    RemoveContainerRequest,
+    RemoveContainerResponse,
     RestartContainerRequest,
     StartContainerRequest,
     StopContainerRequest,
@@ -81,7 +83,9 @@ def _require_name(name: str) -> str:
 
 def _info(ctx: Context, snapshot) -> object:
     return model.build_container_info(
-        snapshot, controllable=ctx.guard.controllable(snapshot.name, snapshot.id)
+        snapshot,
+        controllable=ctx.guard.controllable(snapshot.name, snapshot.id),
+        removable=ctx.guard.removable(snapshot.name, snapshot.id),
     )
 
 
@@ -92,7 +96,10 @@ def handle_list(ctx: Context, op) -> None:
     if request.name_glob:
         snapshots = [s for s in snapshots if fnmatch.fnmatchcase(s.name, request.name_glob)]
 
-    response = ListContainersResponse(control_enabled=ctx.guard.control_enabled)
+    response = ListContainersResponse(
+        control_enabled=ctx.guard.control_enabled,
+        remove_enabled=ctx.guard.remove_enabled,
+    )
     response.observed_at.FromNanoseconds(time.time_ns())
     response.containers.extend(_info(ctx, s) for s in sorted(snapshots, key=lambda s: s.name))
     op.reply_ok(response)
@@ -164,6 +171,36 @@ def _handle_action(verb: str, request_cls, ctx: Context, op) -> None:
     op.reply_ok(ContainerActionResponse(container=_info(ctx, snapshot)))
 
 
+def handle_remove(ctx: Context, op) -> None:
+    request = _parse(RemoveContainerRequest, op.request_bytes)
+    name = _require_name(request.name)
+
+    # Its OWN allow-list, not the control one. A responder permitted to restart
+    # every container on the host removes nothing unless --allow-remove says so.
+    decision = ctx.guard.decide_remove(name)
+    if not decision.allowed:
+        logger.info("[guard] refused remove %r: %s", name, decision.reason)
+        op.reply_err(decision.reason, decision.code)
+        return
+
+    snapshot, was_running = ctx.backend.remove(
+        name, force=request.force, remove_volumes=request.remove_volumes
+    )
+    # WARNING, not info: this is the one procedure here whose effect cannot be
+    # undone by calling another one, and the log line is the only record left
+    # once the container is gone.
+    logger.warning(
+        "Removed container %r (id=%s, was_running=%s, volumes=%s)",
+        snapshot.name,
+        snapshot.id[:12],
+        was_running,
+        request.remove_volumes,
+    )
+    op.reply_ok(
+        RemoveContainerResponse(name=snapshot.name, id=snapshot.id, force_applied=was_running)
+    )
+
+
 def _guarded(fn: Callable[..., None], ctx: Context) -> Callable[[object], None]:
     """Turn a handler into the ``Callable[[RpcOp], None]`` serve_rpc wants, and
     convert :class:`BackendError` into the typed reply it stands for.
@@ -195,7 +232,7 @@ def _summary(request_cls, *fields: str) -> Callable[[bytes], str]:
 def build(ctx: Context) -> tuple[dict, dict]:
     """Return ``(handlers, summarizers)`` for :func:`keelson.scaffolding.serve_rpc`.
 
-    All five procedures the interface declares are present. ``serve_rpc``'s
+    All six procedures the interface declares are present. ``serve_rpc``'s
     liveliness token advertises the complete interface, so a missing handler
     would advertise a procedure that silently never answers.
     """
@@ -209,6 +246,9 @@ def build(ctx: Context) -> tuple[dict, dict]:
         "restart": _guarded(
             functools.partial(_handle_action, "restart", RestartContainerRequest), ctx
         ),
+        # Not _handle_action: remove answers a different response message, reads
+        # a different allow-list, and takes no timeout.
+        "remove": _guarded(handle_remove, ctx),
     }
     summarizers = {
         "list": _summary(ListContainersRequest, "running_only", "name_glob"),
@@ -216,5 +256,6 @@ def build(ctx: Context) -> tuple[dict, dict]:
         "start": _summary(StartContainerRequest, "name"),
         "stop": _summary(StopContainerRequest, "name", "timeout_s"),
         "restart": _summary(RestartContainerRequest, "name", "timeout_s"),
+        "remove": _summary(RemoveContainerRequest, "name", "force", "remove_volumes"),
     }
     return handlers, summarizers

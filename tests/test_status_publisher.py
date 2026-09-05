@@ -12,10 +12,7 @@ import time
 import pytest
 
 from keelson_interface_docker.guard import ControlGuard
-from keelson_interface_docker.interfaces.ContainerControl_pb2 import (
-    ContainerHostStatus,
-    StatusTrigger,
-)
+from keelson_interface_docker.interfaces import ContainerHostStatus, StatusTrigger
 from keelson_interface_docker.status_publisher import SUBJECT, ContainerStatusPublisher
 
 from .fakes import FakeBackend, snapshot

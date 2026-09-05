@@ -33,7 +33,7 @@ import keelson
 from keelson.scaffolding import declare_publisher
 
 from . import model
-from .interfaces.ContainerControl_pb2 import ContainerHostStatus, StatusTrigger
+from .interfaces import ContainerHostStatus, StatusTrigger
 
 logger = logging.getLogger("keelson-interface-docker.status")
 
@@ -113,7 +113,11 @@ class ContainerStatusPublisher:
 
     def _snapshot(self) -> list:
         return [
-            model.build_container_info(s, controllable=self._guard.controllable(s.name, s.id))
+            model.build_container_info(
+                s,
+                controllable=self._guard.controllable(s.name, s.id),
+                removable=self._guard.removable(s.name, s.id),
+            )
             for s in sorted(self._backend.list(), key=lambda s: s.name)
         ]
 
@@ -136,6 +140,7 @@ class ContainerStatusPublisher:
         message = ContainerHostStatus(
             containers=infos,
             control_enabled=self._guard.control_enabled,
+            remove_enabled=self._guard.remove_enabled,
             trigger=trigger,
             sequence=self._sequence,
         )

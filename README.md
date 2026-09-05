@@ -1,7 +1,7 @@
 # keelson-interface-docker
 
 A keelson RPC responder that exposes one host's containers on the bus: list
-them, tail their logs, start / stop / restart them.
+them, tail their logs, start / stop / restart them, and remove them.
 
 It serves the **`container_control/v1`** interface, so its keys are:
 
@@ -15,6 +15,11 @@ for example `rise/@v0/masslab/@rpc/container_control/v1/list/masslab-4`.
 > root-equivalent on its host. `start`, `stop` and `restart` refuse with
 > `PERMISSION_DENIED` until it is started with `--allow-control` *and* an
 > explicit `--allow` allow-list. See [Safety model](#safety-model).
+>
+> **`remove` is off even then.** It is the one irreversible verb here, so it has
+> its own switch and its own allow-list: `--allow-remove GLOB`. Turning control
+> on does not turn removal on, and upgrading a responder that has had control
+> enabled for months does not either.
 
 ## Procedures
 
@@ -25,6 +30,7 @@ for example `rise/@v0/masslab/@rpc/container_control/v1/list/masslab-4`.
 | `start` | `StartContainerRequest{name}` | `ContainerActionResponse{container}` | Idempotent. |
 | `stop` | `StopContainerRequest{name, timeout_s}` | `ContainerActionResponse{container}` | Idempotent. |
 | `restart` | `RestartContainerRequest{name, timeout_s}` | `ContainerActionResponse{container}` | |
+| `remove` | `RemoveContainerRequest{name, force, remove_volumes}` | `RemoveContainerResponse{name, id, force_applied}` | Refuses a running container with `INVALID_STATE` unless `force`. |
 
 The contract is [`interfaces/ContainerControl.proto`](interfaces/ContainerControl.proto).
 Two things about it are worth knowing before you write a client:
@@ -53,7 +59,7 @@ speak protobuf.
 The previous version of this interface exposed exactly that to any peer that
 could reach one zenoh key, with no check of any kind. What replaces it:
 
-1. **Read-only by default.** Without `--allow-control`, the three mutating
+1. **Read-only by default.** Without `--allow-control`, the mutating
    procedures refuse *before touching the socket* — so a refused call cannot
    even be used to probe which containers exist on the host.
 2. **An explicit allow-list.** `--allow-control` requires at least one
@@ -61,10 +67,52 @@ could reach one zenoh key, with no check of any kind. What replaces it:
    Starting with control enabled and nothing allowed is rejected at startup
    rather than producing a responder that looks enabled and refuses everything.
    `--allow '*'` is how you say "everything", deliberately.
-3. **Self-protection.** The responder refuses to stop or restart its own
+3. **Self-protection.** The responder refuses to stop, restart or remove its own
    container even when a glob matches it — that call would kill the responder
    mid-flight, and the caller would see a transport timeout rather than an
    answer.
+4. **A second gate for `remove`.** `--allow-remove GLOB` is matched
+   independently of `--allow`, and having none is what keeps the procedure off.
+   There is no `--allow-remove` boolean to fall out of step with the list, which
+   is the failure mode `--allow-control` needs its own startup check for.
+
+### Why removal is not just another controlled verb
+
+`start`, `stop` and `restart` are recoverable: the wrong click is undone by the
+opposite click, and the container is still there while you work out which. A
+removal is not, and nothing in this interface recreates a container — only the
+deployment that defined it does.
+
+That asymmetry rules out the smaller design, where `--allow-control` covers all
+four. Two things break under it. **Upgrades:** every deployment already running
+`--allow-control --allow '*'` — which is this repo's own compose file — would
+acquire the power to delete anything on its host by pulling an image, with no
+change to its configuration and nothing in its logs to say so. And **blast
+radius:** the useful posture is control over everything and removal over almost
+nothing, and a single flag cannot say it.
+
+So the separation runs the whole way down rather than stopping at the flag:
+`remove_enabled` beside `control_enabled` on the listing, `removable` beside
+`controllable` per container. A client that greys its Remove button on
+`controllable` is reading the wrong field and will offer an action that every
+call refuses.
+
+### What `remove` does and does not touch
+
+- **A running container is refused**, with `INVALID_STATE` and a description
+  naming the stop it needs. `force: true` kills it first, and is a separate
+  decision in a separate call — the confirmation lives in the protocol rather
+  than only in whichever UI is in front of the operator. `force_applied` on the
+  reply says whether it was actually used, so "I tidied up an exited container"
+  and "I took a running one down" are distinguishable after the fact.
+- **Named volumes are never touched.** They outlive the container by definition
+  and are shared with whatever else mounts them. `remove_volumes: true` reaches
+  the *anonymous* ones only, and is off by default: reclaiming disk is a
+  deliberate act, not a side effect of tidying a container list.
+- **The reply is `RemoveContainerResponse`, not `ContainerActionResponse`.**
+  Every other action returns the container's state *after* the operation; after
+  a removal there is none to read, and a `ContainerInfo` describing a container
+  that no longer exists is a falsehood a client would render as an ordinary row.
 
 Refusals come back as `ErrorResponse.PERMISSION_DENIED` with a description
 naming *which* rule fired, because the operator's next move differs in each case.
@@ -242,13 +290,16 @@ required. Beyond those:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--allow-control` | off | Permit start/stop/restart. Requires ≥1 `--allow`. |
+| `--allow-control` | off | Permit start/stop/restart. Requires ≥1 `--allow`. Does **not** enable `remove`. |
 | `--allow GLOB` | — | Container name glob that may be controlled; repeatable. |
+| `--allow-remove GLOB` | — | Container name glob that may be **removed**; repeatable. Requires `--allow-control`; matched independently of `--allow`. Passing none keeps `remove` off. |
 | `--self-container-name NAME` | — | This responder's own `container_name:`. |
 | `--stop-timeout-s` | 10 | Grace period before SIGKILL when a request omits one. |
 | `--default-tail-lines` | 200 | Used when a request asks for 0 lines. |
 | `--max-tail-lines` | 5000 | Requests above this are clamped, not rejected. |
 | `--max-log-bytes` | 1000000 | Oldest lines are dropped to fit; `truncated` is set. |
+| `--publish-stats GLOB` | — | Container name glob to sample resource use for; repeatable. Off entirely when unset. |
+| `--stats-interval-s` | 10.0 | Sampling interval, and the window every rate is averaged over. |
 
 ## Calling it
 
@@ -272,7 +323,9 @@ import keelson, zenoh
 from keelson_interface_docker.interfaces import ListContainersRequest, ListContainersResponse
 
 with zenoh.open(zenoh.Config()) as session:
-    key = keelson.construct_rpc_key("rise", "masslab", "container_control", "v1", "list", "masslab-4")
+    key = keelson.construct_rpc_key(
+        "rise", "masslab", "container_control", "v1", "list", "masslab-4"
+    )
     for reply in session.get(key, payload=ListContainersRequest().SerializeToString(), timeout=5.0):
         print(ListContainersResponse.FromString(reply.ok.payload.to_bytes()))
 ```
@@ -470,10 +523,11 @@ indistinguishable from a quiet one, a wedged publisher and a dead host. A
 whole-host snapshot expresses removal by omission, and "that container is gone"
 is exactly what an operator needs to see.
 
-**A recorder needs two extra files.** The subject and its payload are registered
-locally at startup (`interfaces/subjects.yaml` plus the generated
+**A recorder needs two extra files.** This subject and its payload are
+registered locally at startup (`interfaces/subjects.yaml` plus the generated
 `ContainerControl.desc`), the same way this repo registers its interface, so
-`keelson2mcap` must be given the same pair or it writes an undecodable blob:
+`keelson2mcap` must be given the same pair or it writes an undecodable blob.
+The same two files cover `container_stats` below, so this is one flag, not two:
 
 ```
 --extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc
@@ -481,29 +535,140 @@ locally at startup (`interfaces/subjects.yaml` plus the generated
 
 It is *not* a sixth procedure — see below.
 
-### It does not publish container or host **resource** stats
+### It publishes container **resource** stats, opt-in
 
-Logs and state were different cases, and the difference is the whole reason
-those were done and this was not: `log_message` → `foxglove.Log` already existed
-upstream with a QoS profile assigned, and container state is the literal content
-of an existing procedure's response. Resource metrics are neither.
+`container_stats` → `keelson.interfaces.container_control.ContainerHostStats`,
+on `{realm}/@v0/{entity}/pubsub/container_stats/{source_id}` — **one key per
+host**, carrying one `ContainerResourceUsage` per sampled container: CPU
+percentage and core count, memory working set and percentage, network and block
+I/O totals with their per-second rates, PID count, the configured allocation
+(`--cpus`, `--cpu-shares`, `--cpuset-cpus`, `--memory`), and CFS throttling.
 
-`docker stats`-style telemetry (CPU, memory, restart history) is not on the bus,
-for three independent reasons:
+Controlled by `--publish-stats GLOB` (**off entirely when unset**, repeatable)
+and `--stats-interval-s` (10.0).
 
-1. **No subject fits.** The nearest misses in keelson's `subjects.yaml` —
-   `sensor_status`, `network_status`, `device_uptime_duration` — are all about a
-   *device*. It would need new upstream subjects and payload types.
-2. **It could not be a sixth procedure.** Continuous streams are pub/sub, not
-   RPC; and adding a procedure to a published interface version is a breaking
-   change requiring `v2`, because a consumer cannot tell "this implementor
-   predates the method" from "this implementor is unreachable" — zenoh returns
-   no reply for both. This is why `container_status` above is a *message* and a
-   subject, not a procedure: adding a message changes no existing message's wire
-   format and leaves `service ContainerControl` at five procedures.
-3. **The fleet already answers it, off-bus and on purpose.** netdata and
-   portainer run per platform. Putting per-container stats on the bus would buy
-   a worse version of a deployed tool, on the link that carries navigation data.
+**Off by default, unlike `--publish-status`, and the difference is the point.**
+That one republishes precisely the bytes `list` already hands to any bus
+participant who asks, only on time. This is *new* continuous telemetry: every
+tick is a sample by definition, so it is a fixed-rate load on a link that also
+carries navigation data. An operator who can reach netdata or portainer on the
+host should leave it off.
+
+**What it buys where those cannot reach.** netdata and portainer are still
+better at this, on a machine you can open a browser to. What they cannot do is
+put utilisation *in the MCAP recording*, on the same clock as the vessel data —
+so "the connector dropped out at 14:03" can be laid next to "that container was
+CFS-throttled at 14:03", after the fact, on a host nobody can reach any more.
+That is the case this is for, and the reason it is opt-in rather than absent.
+
+**Every tick publishes; there is no change detection.** The one place this
+departs from `container_status`, and not an oversight. Container state is a step
+function, so suppressing repeats there is what lets a subscriber trust that a
+message means something moved. Utilisation changes on every sample by
+definition: a series with its repeats suppressed is a series with holes in it,
+and a consumer could not tell a quiet container from a stalled publisher.
+
+**Unset is not zero.** Everything derived from a *pair* of readings — the CPU
+percentage and all four byte rates — is absent, not zero, when there is no
+usable predecessor. Three ordinary cases produce that:
+
+- the **first sample** for a container, which has nothing to difference against;
+- a **restart**, which zeroes the cgroup counters; one tick unset, then it
+  resumes. (Keyed by container id, so a `--force-recreate` — same name, fresh
+  counters — is the same story rather than a spike that never happened.)
+- a **host-networked container**, whose four network fields are absent
+  permanently: it has no interface of its own, and the Engine omits the
+  counters rather than zeroing them. Reporting 0 would claim it moves no
+  traffic, which is the opposite of true.
+
+A dashboard cannot tell 0.0 from "no reading" — it draws a flat line through the
+gap and an alert rule reads it as healthy — which is why every such field is
+`optional` in the proto and why `tests/test_proto_contract.py` pins that
+presence field by field.
+
+**The rule survives rendering and then dies in arithmetic.** Rendering absence
+as a dash is the easy half; the half that gets missed is that an absent reading
+must never reach a comparator, an average, a threshold or a sum. In a language
+where the absent value coerces — JavaScript's `null - 5` is `-5`, `null - null`
+is `0` — a naive sort promotes "never measured" to the top of an ascending CPU
+column, where it reads as *lowest*. No decoder test catches that: the decode was
+correct and the presence was intact right up until something did sums with it.
+The crowsnest implementation ranks absent rows out before comparison so they
+sort last in **both** directions, while a *measured* zero sorts as the number it
+is — and pins that in its own checks. If you consume this subject, the question
+to ask of every numeric path is not "do I handle null?" but "does null get to
+pretend it is a number here?".
+
+**Running containers only.** A stopped container's stats call still answers
+`200`, with an all-empty body; published naively that is a row reading "0% CPU,
+0 bytes" for something that is not running at all. It is omitted instead, and
+`container_status` — which carries the complete set including stopped ones — is
+where absence means *gone*.
+
+**Configured limits come from the container's configuration, not the counters.**
+The Engine reports the host's total memory as the `limit` of an unconstrained
+container, so `memory_limit_bytes` is set only when a limit was actually
+configured. `memory_used_pct` still divides by the reported limit either way,
+which is the number `docker stats` prints in its MEM% column.
+
+That last part has a consequence a consumer must handle: **`memory_used_pct` is
+of the limit when there is one and of host total when there is not**, so what it
+is a percentage *of* depends on whether `memory_limit_bytes` is present. Label
+the two cases differently ("of limit" / "of host") or a fleet table shows two
+incomparable percentages in one column. It is kept because dropping it would
+lose the docker-comparable figure for the unconstrained containers that are the
+overwhelming majority — but it is the one place here where one field's presence
+changes another's meaning, which the throttling counters are `optional`
+specifically to avoid.
+
+**One sweep, one thread, one-shot samples.** `stats(stream=False,
+one_shot=True)`: without `one_shot` the daemon sleeps a full sampling cycle
+before answering — about a second *per container* — which is why `docker stats
+--no-stream` over eight containers takes two seconds. One-shot reads the cgroup
+files and returns; eight containers sweep in about a tenth of a second. The
+price is that `precpu_stats` comes back zeroed, which is why the differencing is
+done here. The publisher warns if a sweep exceeds half the interval.
+
+**It is not a sixth procedure**, for the reason `container_status` is not:
+continuous streams are pub/sub, not RPC, and adding a procedure to a published
+interface version is a breaking change requiring `v2` — a consumer cannot tell
+"this implementor predates the method" from "this implementor is unreachable",
+because zenoh returns no reply for both. Adding a message changes no existing
+message's wire format, and no `rpc` could express a continuous stream anyway.
+
+(The paragraph above used to say this kept the service "at five procedures", and
+argue that a sixth would be a v2-requiring break. `remove` became the sixth in
+2026-09. The rule is not that procedures are free — a consumer cannot tell "this
+implementor predates the method" from "this implementor is unreachable", because
+zenoh returns no reply for either. What made it admissible is that this interface
+is still *provisional*: one responder, one client, absent from keelson's
+`messages/interfaces.yaml`, so both sides move in a single commit and no third
+party can hold a stale procedure list. Once it is upstreamed that stops being
+true and the next procedure costs a `v2`.)
+
+**The recorder needs the same two files as `container_status`** — one
+`--extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc`
+now covers both subjects.
+
+**Decoding it in JavaScript: do not "fix" the defaults option.** protobufjs
+compiles a proto3 `optional` field to a synthetic oneof, and `toObject`'s
+`defaults: true` does not populate oneof members — so presence survives
+`defaults: true` intact, and the defensive-looking move of setting
+`defaults: false` because "this message is mostly optional" is actively wrong.
+It changes nothing for the optional fields and turns the five non-optional ones
+into `undefined` whenever they hold their proto3 default, where `0` resident
+bytes and an empty `cpuset_cpus` are both real readings. Verified against live
+payloads by the crowsnest side. (`ts-proto` differs from protobufjs on
+timestamps — a `Date` rather than `{seconds, nanos}` — but that is a rendering
+detail; this one silently loses data.)
+
+**Host-level totals are not here, deliberately.** Summing the containers does
+not give you the host: non-containerised processes are outside the sum, so "is
+this host oversubscribed?" is not answerable from this subject and is not meant
+to be. Those figures come from a host telemetry agent — `keelson-connector-pc`
+publishes `cpu_load_pct`, `memory_total_bytes` and the rest of keelson's compute
+host telemetry block. Duplicating them into a container message is how two
+sources of truth start.
 
 ## Upstreaming this interface into keelson
 

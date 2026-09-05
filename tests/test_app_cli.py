@@ -46,6 +46,21 @@ class TestArgumentValidation:
         assert result.returncode != 2
         assert "requires at least one --allow" not in result.stderr
 
+    def test_allow_remove_without_allow_control_is_rejected(self):
+        # Removal without control would also skip build_guard's self-identity
+        # resolution, leaving the responder able to delete its own container.
+        result = run([*BASE, "--allow-remove", "scratch-*"])
+        assert result.returncode == 2
+        assert "--allow-remove requires --allow-control" in result.stderr
+
+    def test_allow_remove_alongside_control_gets_past_argument_parsing(self, fake_docker_env):
+        result = run(
+            [*BASE, "--allow-control", "--allow", "x-*", "--allow-remove", "x-*"],
+            env=fake_docker_env,
+        )
+        assert result.returncode != 2
+        assert "--allow-remove requires" not in result.stderr
+
     @pytest.mark.parametrize("missing", ["-r", "-e", "-s"])
     def test_identity_arguments_are_required(self, missing):
         args = list(BASE)
@@ -57,7 +72,13 @@ class TestArgumentValidation:
     def test_help_lists_the_control_flags(self):
         result = run([APP, "--help"])
         assert result.returncode == 0
-        for flag in ("--allow-control", "--allow", "--self-container-name"):
+        for flag in ("--allow-control", "--allow", "--allow-remove", "--self-container-name"):
+            assert flag in result.stdout
+
+    def test_help_lists_the_stats_flags(self):
+        result = run([APP, "--help"])
+        assert result.returncode == 0
+        for flag in ("--publish-stats", "--stats-interval-s"):
             assert flag in result.stdout
 
 

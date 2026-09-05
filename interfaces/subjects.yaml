@@ -3,13 +3,13 @@
 # Same shape as keelson's own messages/subjects.yaml. Loaded at startup with
 # keelson.add_well_known_subjects_and_proto_definitions() -- alongside the
 # generated descriptor set, which is what lets the payload be DECODED rather
-# than merely named -- so construct_pubsub_key() stops warning that
-# container_status is not well known, and so an MCAP recording of it carries a
+# than merely named -- so construct_pubsub_key() stops warning that these
+# subjects are not well known, and so an MCAP recording of them carries a
 # schema instead of an undecodable blob.
 #
 # THE RECORDER NEEDS BOTH FILES TOO. keelson2mcap makes the identical
 # registration call behind --extra-subjects-types=<this file>,<the .desc>. It is
-# deployed from another repo, so without that flag a recording of this subject
+# deployed from another repo, so without that flag a recording of these subjects
 # is bytes with no schema. See README -> "It publishes container state".
 #
 # NO QoS ENTRY, DELIBERATELY. add_qos_profiles() would accept a subjects-only
@@ -17,13 +17,18 @@
 # subject inherits `default` (DATA / DROP / RELIABLE), and the tempting
 # `elevated` exists for data that is acted on live -- rudder, position, mode.
 # Container state is an engineering view refreshed in seconds, and putting it
-# above routine telemetry on a link that also carries navigation data is exactly
-# the mistake the README's stats section refuses.
+# above routine telemetry on a link that also carries navigation data would be a
+# mistake; container_stats, which is fixed-rate and larger, more so. If either
+# has to yield on a saturated link, that is the correct outcome.
 #
 # THIS FILE IS PART OF THE UPSTREAMING UNIT: when ContainerControl.proto moves
-# into the keelson monorepo, this line moves into keelson's messages/subjects.yaml
-# and this file is deleted. See also interfaces/interfaces.yaml, which moves to
-# messages/interfaces.yaml, and the descriptor set, which is subsumed by
-# keelson's own bundled one.
+# into the keelson monorepo, these lines move into keelson's
+# messages/subjects.yaml and this file is deleted. See also
+# interfaces/interfaces.yaml, which moves to messages/interfaces.yaml, and the
+# descriptor set, which is subsumed by keelson's own bundled one.
 
+# What is running, published when it changes.
 container_status: keelson.interfaces.container_control.ContainerHostStatus
+
+# What it is costing, published every tick. Off unless --publish-stats is given.
+container_stats: keelson.interfaces.container_control.ContainerHostStats

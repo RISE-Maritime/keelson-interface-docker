@@ -42,6 +42,9 @@ class FakeContainer:
     def restart(self, **kwargs):
         self.actions.append(("restart", kwargs))
 
+    def remove(self, **kwargs):
+        self.actions.append(("remove", kwargs))
+
     def logs(self, **kwargs):
         self.actions.append(("logs", kwargs))
         return b"2026-01-01T00:00:00Z line\n"
@@ -203,6 +206,70 @@ class TestActions:
         backend, _ = make_backend(containers=[container])
         backend.start("app", timeout_s=7)
         assert ("start", {}) in container.actions
+
+
+#: A container the Engine reports as stopped. Module-level rather than a class
+#: attribute: ruff's RUF012 rejects a mutable default on a class, and a shared
+#: dict a test could mutate is exactly what that rule is about.
+STOPPED_ATTRS = {"State": {"Status": "exited", "Running": False}}
+
+
+class TestRemove:
+    """The one action with nothing to re-read afterwards."""
+
+    def test_a_stopped_container_is_removed_and_not_reloaded(self, make_backend):
+        # reload() on a container that has just been deleted raises NotFound,
+        # which would surface as "no such container" for a removal that in fact
+        # succeeded.
+        container = FakeContainer(attrs=STOPPED_ATTRS)
+        backend, _ = make_backend(containers=[container])
+        snapshot, was_running = backend.remove("app")
+        assert ("remove", {"force": False, "v": False}) in container.actions
+        assert "reload" not in container.actions
+        assert (snapshot.name, was_running) == ("app", False)
+
+    def test_a_running_container_is_refused_before_the_daemon_is_touched(self, make_backend):
+        container = FakeContainer(attrs={"State": {"Status": "running", "Running": True}})
+        backend, _ = make_backend(containers=[container])
+        with pytest.raises(BackendError) as excinfo:
+            backend.remove("app")
+        assert excinfo.value.code == ErrorResponse.Code.INVALID_STATE
+        assert not [a for a in container.actions if a[0] == "remove"]
+
+    def test_force_removes_a_running_container_and_reports_that_it_was(self, make_backend):
+        container = FakeContainer(attrs={"State": {"Status": "running", "Running": True}})
+        backend, _ = make_backend(containers=[container])
+        snapshot, was_running = backend.remove("app", force=True)
+        assert ("remove", {"force": True, "v": False}) in container.actions
+        assert was_running is True
+        assert snapshot.id == "a" * 64
+
+    def test_remove_volumes_maps_to_the_v_flag(self, make_backend):
+        container = FakeContainer(attrs=STOPPED_ATTRS)
+        backend, _ = make_backend(containers=[container])
+        backend.remove("app", remove_volumes=True)
+        assert ("remove", {"force": False, "v": True}) in container.actions
+
+    def test_an_unknown_container_is_not_found(self, make_backend):
+        backend, _ = make_backend(containers=[])
+        with pytest.raises(BackendError) as excinfo:
+            backend.remove("ghost")
+        assert excinfo.value.code == ErrorResponse.Code.NOT_FOUND
+
+    def test_a_daemon_refusal_still_translates(self, make_backend):
+        # The daemon stays the authority: a container that starts between our
+        # read and the delete gets its own 409, and it must not escape as a raw
+        # docker-py exception.
+        container = FakeContainer(attrs=STOPPED_ATTRS)
+
+        def boom(**_):
+            raise APIError("409 Client Error: Conflict")
+
+        container.remove = boom
+        backend, _ = make_backend(containers=[container])
+        with pytest.raises(BackendError) as excinfo:
+            backend.remove("app")
+        assert excinfo.value.code == ErrorResponse.Code.IO_FAILURE
 
 
 class TestLogs:

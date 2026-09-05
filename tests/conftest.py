@@ -46,6 +46,25 @@ def control_ctx(backend):
 
 
 @pytest.fixture
+def remove_ctx(backend):
+    """Control on, and removal on for a NARROWER set than control.
+
+    Deliberately not the same globs: every test that asserts removal is gated
+    separately would pass vacuously if the two lists were equal.
+    """
+    return Context(
+        backend=backend,
+        guard=ControlGuard(
+            control_enabled=True,
+            allow_globs=("keelson-*", "grafana"),
+            remove_globs=("grafana",),
+            self_identity=frozenset({"keelson-interface-docker", "s" * 64}),
+        ),
+        limits=Limits(),
+    )
+
+
+@pytest.fixture
 def fake_engine():
     """A stub Docker Engine on a unix socket.
 

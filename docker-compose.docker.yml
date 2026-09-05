@@ -72,11 +72,30 @@ services:
     # and one or more --allow globs, and keep --self-container-name in step with
     # container_name: above:
     #   --allow-control --allow 'keelson-*'
+    #
+    # REMOVAL IS A SEPARATE OPT-IN and is deliberately absent below, even though
+    # this file allows control over '*'. --allow-remove takes its own globs and
+    # is matched independently, so the useful posture -- restart anything, delete
+    # almost nothing -- is the one you can express:
+    #   --allow-remove 'scratch-*'
+    # Do not reach for --allow-remove '*' here to match the --allow '*' above.
+    # Nothing in this interface recreates a container; only the compose file that
+    # defined it does.
+    #
+    # --publish-stats is the only flag here that puts a FIXED-RATE load on the
+    # bus: every tick is a sample, so unlike container_status there is no quiet
+    # period to fall back to. Narrow the glob or lengthen the interval before
+    # dropping it entirely -- on a host reachable by netdata or portainer, this
+    # earns its place mainly by landing in the MCAP recording alongside the
+    # vessel data.
     command: >
       --log-level 20
-      -r rise -e crab -s big
+      -r rise -e sealog-9 -s rig
       --mode peer --connect tcp/127.0.0.1:7447
       --self-container-name keelson-interface-docker
       --allow-control --allow '*'
       --status-interval-s 5
+      --publish-stats '*'
+      --stats-interval-s 10
       --follow-logs '*'
+      --allow-remove '*'
