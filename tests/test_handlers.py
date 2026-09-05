@@ -1,4 +1,4 @@
-"""The five procedures.
+"""The six procedures.
 
 The invariant every test here asserts, directly or via `op.replies == 1`: a
 handler replies exactly once on every path. The previous implementation left
@@ -20,12 +20,13 @@ from keelson_interface_docker.interfaces import (
     ListContainersRequest,
     LogStream,
     LogStreamSelector,
+    RemoveContainerRequest,
     StopContainerRequest,
 )
 
 from .fakes import FakeBackend, FakeOp, snapshot
 
-ALL_PROCEDURES = ("list", "logs", "start", "stop", "restart")
+ALL_PROCEDURES = ("list", "logs", "start", "stop", "restart", "remove")
 
 
 def run(ctx, procedure, request=None) -> FakeOp:
@@ -237,3 +238,129 @@ class TestSummarizers:
     @pytest.mark.parametrize("procedure", ALL_PROCEDURES)
     def test_an_empty_request_summarizes_without_raising(self, readonly_ctx, procedure):
         assert handlers.build(readonly_ctx)[1][procedure](b"") == ""
+
+
+class TestRemove:
+    """`remove` is gated by its OWN allow-list, and answers its own message.
+
+    The fixture is deliberately asymmetric -- control covers `keelson-*` and
+    `grafana`, removal covers only `grafana` -- so a regression that routed
+    remove through the control guard would be caught rather than passing on a
+    list that happened to match.
+    """
+
+    def test_a_control_enabled_responder_still_refuses_to_remove(self, control_ctx):
+        # control_ctx has no remove_globs at all. This is the upgrade case: a
+        # deployment that turned control on months ago must not acquire removal
+        # by pulling a new image.
+        op = run(control_ctx, "remove", RemoveContainerRequest(name="keelson-router"))
+        assert op.replies == 1
+        assert op.err[1] == ErrorResponse.Code.PERMISSION_DENIED
+        assert "removal is disabled" in op.err[0]
+
+    def test_the_refusal_never_reached_the_daemon(self, control_ctx):
+        run(control_ctx, "remove", RemoveContainerRequest(name="keelson-router"))
+        assert control_ctx.backend.calls == []
+
+    def test_a_container_in_the_control_list_but_not_the_remove_list_is_refused(self, remove_ctx):
+        # keelson-router is controllable here and NOT removable. The two lists
+        # are read independently; this is the assertion that proves it.
+        op = run(remove_ctx, "remove", RemoveContainerRequest(name="keelson-router"))
+        assert op.err[1] == ErrorResponse.Code.PERMISSION_DENIED
+        assert "remove allow-list" in op.err[0]
+        assert remove_ctx.backend.calls == []
+
+    def test_removing_a_stopped_container_in_the_list_succeeds(self, remove_ctx):
+        op = run(remove_ctx, "remove", RemoveContainerRequest(name="grafana"))
+        assert op.replies == 1 and op.err is None
+        assert op.ok.name == "grafana"
+        assert op.ok.id == "g" * 64
+        assert op.ok.force_applied is False
+
+    def test_a_running_container_is_refused_without_force(self, remove_ctx):
+        ctx = Context(
+            backend=FakeBackend([snapshot("scratch", "c" * 64, status="running")]),
+            guard=ControlGuard(control_enabled=True, allow_globs=("*",), remove_globs=("scratch",)),
+        )
+        op = run(ctx, "remove", RemoveContainerRequest(name="scratch"))
+        assert op.replies == 1
+        assert op.err[1] == ErrorResponse.Code.INVALID_STATE
+        assert "stop it first" in op.err[0]
+
+    def test_force_removes_a_running_container_and_says_so(self):
+        ctx = Context(
+            backend=FakeBackend([snapshot("scratch", "c" * 64, status="running")]),
+            guard=ControlGuard(control_enabled=True, allow_globs=("*",), remove_globs=("scratch",)),
+        )
+        op = run(ctx, "remove", RemoveContainerRequest(name="scratch", force=True))
+        assert op.err is None
+        # The one thing the reply can say that a list cannot: this was running.
+        assert op.ok.force_applied is True
+
+    def test_volumes_are_left_alone_unless_asked_for(self, remove_ctx):
+        run(remove_ctx, "remove", RemoveContainerRequest(name="grafana"))
+        assert ("remove", "grafana", False, False) in remove_ctx.backend.calls
+
+    def test_remove_volumes_reaches_the_backend(self, remove_ctx):
+        run(remove_ctx, "remove", RemoveContainerRequest(name="grafana", remove_volumes=True))
+        assert ("remove", "grafana", False, True) in remove_ctx.backend.calls
+
+    def test_the_responders_own_container_is_never_removable(self):
+        ctx = Context(
+            backend=FakeBackend([snapshot("me", "m" * 64, status="exited")]),
+            guard=ControlGuard(
+                control_enabled=True,
+                allow_globs=("*",),
+                remove_globs=("*",),
+                self_identity=frozenset({"me"}),
+            ),
+        )
+        op = run(ctx, "remove", RemoveContainerRequest(name="me"))
+        assert op.err[1] == ErrorResponse.Code.PERMISSION_DENIED
+        assert ctx.backend.calls == []
+
+    def test_a_missing_name_is_invalid_argument(self, remove_ctx):
+        op = run(remove_ctx, "remove", RemoveContainerRequest(name=""))
+        assert op.replies == 1
+        assert op.err[1] == ErrorResponse.Code.INVALID_ARGUMENT
+
+    def test_an_unknown_container_inside_the_list_is_not_found(self, remove_ctx):
+        ctx = Context(
+            backend=FakeBackend([]),
+            guard=ControlGuard(control_enabled=True, allow_globs=("*",), remove_globs=("*",)),
+        )
+        op = run(ctx, "remove", RemoveContainerRequest(name="ghost"))
+        assert op.replies == 1
+        assert op.err[1] == ErrorResponse.Code.NOT_FOUND
+
+
+class TestPermissionFlagsOnTheListing:
+    """What a client greys its buttons on, and the reason there are two flags."""
+
+    def test_a_read_only_responder_reports_neither(self, readonly_ctx):
+        op = run(readonly_ctx, "list")
+        assert op.ok.control_enabled is False
+        assert op.ok.remove_enabled is False
+        assert all(not c.controllable and not c.removable for c in op.ok.containers)
+
+    def test_control_without_remove_is_the_common_configuration(self, control_ctx):
+        op = run(control_ctx, "list")
+        assert op.ok.control_enabled is True
+        assert op.ok.remove_enabled is False
+        rows = {c.name: c for c in op.ok.containers}
+        assert rows["keelson-router"].controllable is True
+        assert rows["keelson-router"].removable is False
+
+    def test_the_two_flags_track_their_own_allow_lists(self, remove_ctx):
+        op = run(remove_ctx, "list")
+        assert op.ok.control_enabled is True and op.ok.remove_enabled is True
+        rows = {c.name: c for c in op.ok.containers}
+        # Controllable, not removable.
+        assert rows["keelson-router"].controllable is True
+        assert rows["keelson-router"].removable is False
+        # Both -- it is in each list.
+        assert rows["grafana"].controllable is True
+        assert rows["grafana"].removable is True
+        # Neither: the responder's own container, whichever list names it.
+        assert rows["keelson-interface-docker"].controllable is False
+        assert rows["keelson-interface-docker"].removable is False

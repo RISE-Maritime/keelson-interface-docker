@@ -1,7 +1,7 @@
 # keelson-interface-docker
 
 A keelson RPC responder that exposes one host's containers on the bus: list
-them, tail their logs, start / stop / restart them.
+them, tail their logs, start / stop / restart them, and remove them.
 
 It serves the **`container_control/v1`** interface, so its keys are:
 
@@ -15,6 +15,11 @@ for example `rise/@v0/masslab/@rpc/container_control/v1/list/masslab-4`.
 > root-equivalent on its host. `start`, `stop` and `restart` refuse with
 > `PERMISSION_DENIED` until it is started with `--allow-control` *and* an
 > explicit `--allow` allow-list. See [Safety model](#safety-model).
+>
+> **`remove` is off even then.** It is the one irreversible verb here, so it has
+> its own switch and its own allow-list: `--allow-remove GLOB`. Turning control
+> on does not turn removal on, and upgrading a responder that has had control
+> enabled for months does not either.
 
 ## Procedures
 
@@ -25,6 +30,7 @@ for example `rise/@v0/masslab/@rpc/container_control/v1/list/masslab-4`.
 | `start` | `StartContainerRequest{name}` | `ContainerActionResponse{container}` | Idempotent. |
 | `stop` | `StopContainerRequest{name, timeout_s}` | `ContainerActionResponse{container}` | Idempotent. |
 | `restart` | `RestartContainerRequest{name, timeout_s}` | `ContainerActionResponse{container}` | |
+| `remove` | `RemoveContainerRequest{name, force, remove_volumes}` | `RemoveContainerResponse{name, id, force_applied}` | Refuses a running container with `INVALID_STATE` unless `force`. |
 
 The contract is [`interfaces/ContainerControl.proto`](interfaces/ContainerControl.proto).
 Two things about it are worth knowing before you write a client:
@@ -53,7 +59,7 @@ speak protobuf.
 The previous version of this interface exposed exactly that to any peer that
 could reach one zenoh key, with no check of any kind. What replaces it:
 
-1. **Read-only by default.** Without `--allow-control`, the three mutating
+1. **Read-only by default.** Without `--allow-control`, the mutating
    procedures refuse *before touching the socket* — so a refused call cannot
    even be used to probe which containers exist on the host.
 2. **An explicit allow-list.** `--allow-control` requires at least one
@@ -61,10 +67,52 @@ could reach one zenoh key, with no check of any kind. What replaces it:
    Starting with control enabled and nothing allowed is rejected at startup
    rather than producing a responder that looks enabled and refuses everything.
    `--allow '*'` is how you say "everything", deliberately.
-3. **Self-protection.** The responder refuses to stop or restart its own
+3. **Self-protection.** The responder refuses to stop, restart or remove its own
    container even when a glob matches it — that call would kill the responder
    mid-flight, and the caller would see a transport timeout rather than an
    answer.
+4. **A second gate for `remove`.** `--allow-remove GLOB` is matched
+   independently of `--allow`, and having none is what keeps the procedure off.
+   There is no `--allow-remove` boolean to fall out of step with the list, which
+   is the failure mode `--allow-control` needs its own startup check for.
+
+### Why removal is not just another controlled verb
+
+`start`, `stop` and `restart` are recoverable: the wrong click is undone by the
+opposite click, and the container is still there while you work out which. A
+removal is not, and nothing in this interface recreates a container — only the
+deployment that defined it does.
+
+That asymmetry rules out the smaller design, where `--allow-control` covers all
+four. Two things break under it. **Upgrades:** every deployment already running
+`--allow-control --allow '*'` — which is this repo's own compose file — would
+acquire the power to delete anything on its host by pulling an image, with no
+change to its configuration and nothing in its logs to say so. And **blast
+radius:** the useful posture is control over everything and removal over almost
+nothing, and a single flag cannot say it.
+
+So the separation runs the whole way down rather than stopping at the flag:
+`remove_enabled` beside `control_enabled` on the listing, `removable` beside
+`controllable` per container. A client that greys its Remove button on
+`controllable` is reading the wrong field and will offer an action that every
+call refuses.
+
+### What `remove` does and does not touch
+
+- **A running container is refused**, with `INVALID_STATE` and a description
+  naming the stop it needs. `force: true` kills it first, and is a separate
+  decision in a separate call — the confirmation lives in the protocol rather
+  than only in whichever UI is in front of the operator. `force_applied` on the
+  reply says whether it was actually used, so "I tidied up an exited container"
+  and "I took a running one down" are distinguishable after the fact.
+- **Named volumes are never touched.** They outlive the container by definition
+  and are shared with whatever else mounts them. `remove_volumes: true` reaches
+  the *anonymous* ones only, and is off by default: reclaiming disk is a
+  deliberate act, not a side effect of tidying a container list.
+- **The reply is `RemoveContainerResponse`, not `ContainerActionResponse`.**
+  Every other action returns the container's state *after* the operation; after
+  a removal there is none to read, and a `ContainerInfo` describing a container
+  that no longer exists is a falsehood a client would render as an ordinary row.
 
 Refusals come back as `ErrorResponse.PERMISSION_DENIED` with a description
 naming *which* rule fired, because the operator's next move differs in each case.
@@ -242,8 +290,9 @@ required. Beyond those:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--allow-control` | off | Permit start/stop/restart. Requires ≥1 `--allow`. |
+| `--allow-control` | off | Permit start/stop/restart. Requires ≥1 `--allow`. Does **not** enable `remove`. |
 | `--allow GLOB` | — | Container name glob that may be controlled; repeatable. |
+| `--allow-remove GLOB` | — | Container name glob that may be **removed**; repeatable. Requires `--allow-control`; matched independently of `--allow`. Passing none keeps `remove` off. |
 | `--self-container-name NAME` | — | This responder's own `container_name:`. |
 | `--stop-timeout-s` | 10 | Grace period before SIGKILL when a request omits one. |
 | `--default-tail-lines` | 200 | Used when a request asks for 0 lines. |
@@ -274,7 +323,9 @@ import keelson, zenoh
 from keelson_interface_docker.interfaces import ListContainersRequest, ListContainersResponse
 
 with zenoh.open(zenoh.Config()) as session:
-    key = keelson.construct_rpc_key("rise", "masslab", "container_control", "v1", "list", "masslab-4")
+    key = keelson.construct_rpc_key(
+        "rise", "masslab", "container_control", "v1", "list", "masslab-4"
+    )
     for reply in session.get(key, payload=ListContainersRequest().SerializeToString(), timeout=5.0):
         print(ListContainersResponse.FromString(reply.ok.payload.to_bytes()))
 ```
@@ -583,7 +634,17 @@ continuous streams are pub/sub, not RPC, and adding a procedure to a published
 interface version is a breaking change requiring `v2` — a consumer cannot tell
 "this implementor predates the method" from "this implementor is unreachable",
 because zenoh returns no reply for both. Adding a message changes no existing
-message's wire format and leaves `service ContainerControl` at five procedures.
+message's wire format, and no `rpc` could express a continuous stream anyway.
+
+(The paragraph above used to say this kept the service "at five procedures", and
+argue that a sixth would be a v2-requiring break. `remove` became the sixth in
+2026-09. The rule is not that procedures are free — a consumer cannot tell "this
+implementor predates the method" from "this implementor is unreachable", because
+zenoh returns no reply for either. What made it admissible is that this interface
+is still *provisional*: one responder, one client, absent from keelson's
+`messages/interfaces.yaml`, so both sides move in a single commit and no third
+party can hold a stale procedure list. Once it is upstreamed that stops being
+true and the next procedure costs a `v2`.)
 
 **The recorder needs the same two files as `container_status`** — one
 `--extra-subjects-types=<pkg>/interfaces/subjects.yaml,<pkg>/interfaces/ContainerControl.desc`

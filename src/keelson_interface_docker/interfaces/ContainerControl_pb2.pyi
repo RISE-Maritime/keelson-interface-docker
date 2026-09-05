@@ -83,7 +83,7 @@ STATUS_TRIGGER_CHANGE: StatusTrigger
 STATUS_TRIGGER_HEARTBEAT: StatusTrigger
 
 class ContainerInfo(_message.Message):
-    __slots__ = ("name", "id", "image", "state", "raw_state", "created_at", "started_at", "finished_at", "exit_code", "restart_policy", "restart_policy_max_retries", "restart_count", "health", "controllable", "compose_project", "compose_service")
+    __slots__ = ("name", "id", "image", "state", "raw_state", "created_at", "started_at", "finished_at", "exit_code", "restart_policy", "restart_policy_max_retries", "restart_count", "health", "controllable", "compose_project", "compose_service", "removable")
     NAME_FIELD_NUMBER: _ClassVar[int]
     ID_FIELD_NUMBER: _ClassVar[int]
     IMAGE_FIELD_NUMBER: _ClassVar[int]
@@ -100,6 +100,7 @@ class ContainerInfo(_message.Message):
     CONTROLLABLE_FIELD_NUMBER: _ClassVar[int]
     COMPOSE_PROJECT_FIELD_NUMBER: _ClassVar[int]
     COMPOSE_SERVICE_FIELD_NUMBER: _ClassVar[int]
+    REMOVABLE_FIELD_NUMBER: _ClassVar[int]
     name: str
     id: str
     image: str
@@ -116,7 +117,8 @@ class ContainerInfo(_message.Message):
     controllable: bool
     compose_project: str
     compose_service: str
-    def __init__(self, name: _Optional[str] = ..., id: _Optional[str] = ..., image: _Optional[str] = ..., state: _Optional[_Union[ContainerState, str]] = ..., raw_state: _Optional[str] = ..., created_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., restart_policy: _Optional[_Union[RestartPolicy, str]] = ..., restart_policy_max_retries: _Optional[int] = ..., restart_count: _Optional[int] = ..., health: _Optional[_Union[HealthStatus, str]] = ..., controllable: bool = ..., compose_project: _Optional[str] = ..., compose_service: _Optional[str] = ...) -> None: ...
+    removable: bool
+    def __init__(self, name: _Optional[str] = ..., id: _Optional[str] = ..., image: _Optional[str] = ..., state: _Optional[_Union[ContainerState, str]] = ..., raw_state: _Optional[str] = ..., created_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., restart_policy: _Optional[_Union[RestartPolicy, str]] = ..., restart_policy_max_retries: _Optional[int] = ..., restart_count: _Optional[int] = ..., health: _Optional[_Union[HealthStatus, str]] = ..., controllable: bool = ..., compose_project: _Optional[str] = ..., compose_service: _Optional[str] = ..., removable: bool = ...) -> None: ...
 
 class ListContainersRequest(_message.Message):
     __slots__ = ("running_only", "name_glob")
@@ -127,14 +129,16 @@ class ListContainersRequest(_message.Message):
     def __init__(self, running_only: bool = ..., name_glob: _Optional[str] = ...) -> None: ...
 
 class ListContainersResponse(_message.Message):
-    __slots__ = ("containers", "observed_at", "control_enabled")
+    __slots__ = ("containers", "observed_at", "control_enabled", "remove_enabled")
     CONTAINERS_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_AT_FIELD_NUMBER: _ClassVar[int]
     CONTROL_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_ENABLED_FIELD_NUMBER: _ClassVar[int]
     containers: _containers.RepeatedCompositeFieldContainer[ContainerInfo]
     observed_at: _timestamp_pb2.Timestamp
     control_enabled: bool
-    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ...) -> None: ...
+    remove_enabled: bool
+    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ..., remove_enabled: bool = ...) -> None: ...
 
 class GetLogsRequest(_message.Message):
     __slots__ = ("name", "tail_lines", "since", "stream")
@@ -200,19 +204,41 @@ class ContainerActionResponse(_message.Message):
     container: ContainerInfo
     def __init__(self, container: _Optional[_Union[ContainerInfo, _Mapping]] = ...) -> None: ...
 
+class RemoveContainerRequest(_message.Message):
+    __slots__ = ("name", "force", "remove_volumes")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_VOLUMES_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    force: bool
+    remove_volumes: bool
+    def __init__(self, name: _Optional[str] = ..., force: bool = ..., remove_volumes: bool = ...) -> None: ...
+
+class RemoveContainerResponse(_message.Message):
+    __slots__ = ("name", "id", "force_applied")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    ID_FIELD_NUMBER: _ClassVar[int]
+    FORCE_APPLIED_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    id: str
+    force_applied: bool
+    def __init__(self, name: _Optional[str] = ..., id: _Optional[str] = ..., force_applied: bool = ...) -> None: ...
+
 class ContainerHostStatus(_message.Message):
-    __slots__ = ("containers", "observed_at", "control_enabled", "trigger", "sequence")
+    __slots__ = ("containers", "observed_at", "control_enabled", "trigger", "sequence", "remove_enabled")
     CONTAINERS_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_AT_FIELD_NUMBER: _ClassVar[int]
     CONTROL_ENABLED_FIELD_NUMBER: _ClassVar[int]
     TRIGGER_FIELD_NUMBER: _ClassVar[int]
     SEQUENCE_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_ENABLED_FIELD_NUMBER: _ClassVar[int]
     containers: _containers.RepeatedCompositeFieldContainer[ContainerInfo]
     observed_at: _timestamp_pb2.Timestamp
     control_enabled: bool
     trigger: StatusTrigger
     sequence: int
-    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ..., trigger: _Optional[_Union[StatusTrigger, str]] = ..., sequence: _Optional[int] = ...) -> None: ...
+    remove_enabled: bool
+    def __init__(self, containers: _Optional[_Iterable[_Union[ContainerInfo, _Mapping]]] = ..., observed_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., control_enabled: bool = ..., trigger: _Optional[_Union[StatusTrigger, str]] = ..., sequence: _Optional[int] = ..., remove_enabled: bool = ...) -> None: ...
 
 class ContainerResourceUsage(_message.Message):
     __slots__ = ("name", "id", "cpu_load_pct", "online_cpus", "memory_used_bytes", "memory_limit_bytes", "memory_used_pct", "network_rx_bytes", "network_tx_bytes", "network_rx_bytes_per_second", "network_tx_bytes_per_second", "block_read_bytes", "block_write_bytes", "block_read_bytes_per_second", "block_write_bytes_per_second", "pids_current", "pids_limit", "cpu_allocation_cores", "cpu_shares", "cpuset_cpus", "cpu_throttled_periods", "cpu_throttled_time_ns", "sample_window_s")

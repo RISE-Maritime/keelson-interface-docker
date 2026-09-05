@@ -220,6 +220,26 @@ class FakeBackend:
     def restart(self, name, timeout_s=0):
         return self._act("restart", name, timeout_s)
 
+    def remove(self, name, *, force=False, remove_volumes=False):
+        """Mirrors the real backend's contract, refusal included.
+
+        Returns ``(snapshot, was_running)`` and raises INVALID_STATE for a
+        running container without ``force`` -- a fake that always succeeded
+        would let the handler drop the running check and no test would notice.
+        """
+        self.calls.append(("remove", name, force, remove_volumes))
+        self._maybe_raise()
+        current = self.get(name)
+        was_running = current.attrs["State"]["Status"] == "running"
+        if was_running and not force:
+            raise BackendError(
+                ErrorResponse.Code.INVALID_STATE,
+                f"{name!r} is running; stop it first, or repeat with force to "
+                "kill and remove it in one step",
+            )
+        self.snapshots = [s for s in self.snapshots if s.name != current.name]
+        return current, was_running
+
 
 @dataclass
 class FakeOp:

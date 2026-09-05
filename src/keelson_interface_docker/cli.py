@@ -31,6 +31,8 @@ from .interfaces import (
     ListContainersResponse,
     LogStream,
     LogStreamSelector,
+    RemoveContainerRequest,
+    RemoveContainerResponse,
     RestartContainerRequest,
     StartContainerRequest,
     StopContainerRequest,
@@ -81,13 +83,18 @@ def _fmt_time(message, field: str) -> str:
 def print_containers(response: ListContainersResponse) -> None:
     if not response.control_enabled:
         print("responder is READ-ONLY (start/stop/restart will be refused)\n")
-    header = f"{'NAME':<34} {'STATE':<12} {'CTRL':<5} {'STARTED':<20} IMAGE"
+    elif not response.remove_enabled:
+        # Said explicitly, because "control is on" is exactly the assumption
+        # that would make a refused remove look like a bug.
+        print("responder allows start/stop/restart but NOT remove\n")
+    header = f"{'NAME':<34} {'STATE':<12} {'CTRL':<5} {'RM':<5} {'STARTED':<20} IMAGE"
     print(header)
     print("-" * len(header))
     for c in response.containers:
         state = ContainerState.Name(c.state).replace("CONTAINER_STATE_", "").lower()
         print(
             f"{c.name:<34} {state:<12} {'yes' if c.controllable else 'no':<5} "
+            f"{'yes' if c.removable else 'no':<5} "
             f"{_fmt_time(c, 'started_at'):<20} {c.image}"
         )
     print(f"\n{len(response.containers)} container(s)")
@@ -106,6 +113,11 @@ def print_action(verb: str, response: ContainerActionResponse) -> None:
     c = response.container
     state = ContainerState.Name(c.state).replace("CONTAINER_STATE_", "").lower()
     print(f"{verb} {c.name}: now {state} (restart_count={c.restart_count})")
+
+
+def print_remove(response: RemoveContainerResponse) -> None:
+    killed = " (was running; force killed it)" if response.force_applied else ""
+    print(f"removed {response.name}: id {response.id[:12]} is gone{killed}")
 
 
 def main() -> None:
@@ -141,6 +153,22 @@ def main() -> None:
         if verb != "start":
             p.add_argument("--timeout-s", type=int, default=0)
 
+    p_remove = sub.add_parser(
+        "remove",
+        help="Delete one container. Not undoable by any other procedure here.",
+    )
+    p_remove.add_argument("--name", type=str, required=True)
+    p_remove.add_argument(
+        "--force",
+        action="store_true",
+        help="Kill it first if it is running. Without this a running container is refused.",
+    )
+    p_remove.add_argument(
+        "--volumes",
+        action="store_true",
+        help="Also delete its ANONYMOUS volumes. Named volumes are never touched.",
+    )
+
     args = parser.parse_args()
     setup_logging(level=args.log_level)
 
@@ -170,6 +198,18 @@ def main() -> None:
                         name=args.name, tail_lines=args.tail, stream=_STREAMS[args.stream]
                     ),
                     GetLogsResponse,
+                )
+            )
+        elif args.command == "remove":
+            print_remove(
+                call(
+                    session,
+                    args,
+                    "remove",
+                    RemoveContainerRequest(
+                        name=args.name, force=args.force, remove_volumes=args.volumes
+                    ),
+                    RemoveContainerResponse,
                 )
             )
         else:

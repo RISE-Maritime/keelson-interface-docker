@@ -14,7 +14,7 @@ from .fakes import snapshot
 
 
 def info(**kwargs) -> ContainerInfo:
-    return model.build_container_info(snapshot(**kwargs), controllable=False)
+    return model.build_container_info(snapshot(**kwargs), controllable=False, removable=False)
 
 
 class TestImageReference:
@@ -103,7 +103,9 @@ def test_compose_labels_are_surfaced():
 def test_missing_sections_do_not_raise():
     assert (
         model.build_container_info(
-            model.ContainerSnapshot(name="x", id="y", attrs={}), controllable=True
+            model.ContainerSnapshot(name="x", id="y", attrs={}),
+            controllable=True,
+            removable=False,
         ).name
         == "x"
     )

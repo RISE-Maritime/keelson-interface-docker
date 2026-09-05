@@ -222,6 +222,48 @@ class DockerBackend:
     def restart(self, name: str, timeout_s: int = 0) -> ContainerSnapshot:
         return self._act(name, "restart", timeout=timeout_s)
 
+    def remove(
+        self, name: str, *, force: bool = False, remove_volumes: bool = False
+    ) -> tuple[ContainerSnapshot, bool]:
+        """Delete a container. Returns ``(snapshot as it last was, was_running)``.
+
+        NOT ``_act``, and not because of the different return type. ``_act``
+        ends in ``container.reload()`` to report post-action state; there is no
+        post-action state here, and reload() on a removed container raises
+        NotFound -- which would surface as "no such container" for a removal
+        that had in fact just succeeded. The snapshot is taken BEFORE the call
+        instead, and is the last true thing anyone can say about it.
+
+        The running check is done here, from the attrs we already hold, rather
+        than by letting the daemon's 409 come back: one round trip either way,
+        but this one produces INVALID_STATE and names the stop the operator
+        needs, where the 409 arrives as an IO_FAILURE wrapping a sentence about
+        the Engine API. The daemon remains the authority -- a container that
+        starts between our read and the delete still gets its 409, which is why
+        the except below stays.
+        """
+        try:
+            container = self.client.containers.get(name)
+            snapshot = _snapshot(container)
+            running = bool(((container.attrs or {}).get("State") or {}).get("Running"))
+
+            if running and not force:
+                raise BackendError(
+                    ErrorResponse.Code.INVALID_STATE,
+                    f"{name!r} is running; stop it first, or repeat with force to "
+                    "kill and remove it in one step",
+                )
+
+            # v= is anonymous volumes only. Named volumes are never in scope:
+            # they outlive the container and are shared with whatever else
+            # mounts them.
+            container.remove(force=force, v=remove_volumes)
+            return snapshot, running
+        except BackendError:
+            raise
+        except (APIError, DockerException) as exc:
+            raise self._translate(exc, "remove", name) from exc
+
     def _act(self, name: str, verb: str, **kwargs) -> ContainerSnapshot:
         try:
             container = self.client.containers.get(name)

@@ -85,3 +85,80 @@ def test_controllable_agrees_with_decide_for_every_case():
     )
     for name, cid in [("keelson-router", "r"), ("grafana", "g"), ("keelson-self", "s")]:
         assert guard.controllable(name, cid) == guard.decide(name, cid).allowed
+
+
+class TestRemoveIsGatedSeparately:
+    """--allow-control does not grant removal, and never has to.
+
+    The upgrade case is the one that matters: a responder that has run with
+    control enabled for months pulls an image whose interface grew `remove`. It
+    must still remove nothing.
+    """
+
+    control_only = ControlGuard(control_enabled=True, allow_globs=("*",))
+
+    def test_control_alone_removes_nothing(self):
+        assert self.control_only.remove_enabled is False
+        decision = self.control_only.decide_remove("anything", "id")
+        assert not decision.allowed
+        assert decision.code == ErrorResponse.Code.PERMISSION_DENIED
+
+    def test_the_reason_says_control_is_not_enough(self):
+        reason = self.control_only.decide_remove("anything").reason
+        assert "--allow-remove" in reason
+        assert "does not enable it" in reason
+
+    def test_nothing_is_removable_though_everything_is_controllable(self):
+        assert self.control_only.controllable("anything", "id") is True
+        assert self.control_only.removable("anything", "id") is False
+
+    def test_read_only_refuses_remove_and_names_both_flags(self):
+        reason = ControlGuard().decide_remove("anything").reason
+        assert "--allow-control" in reason and "--allow-remove" in reason
+
+    def test_remove_globs_alone_do_not_enable_it_without_control(self):
+        # app.py refuses this combination at startup; the guard must not rely on
+        # that, because a guard built anywhere else would then be wide open.
+        guard = ControlGuard(remove_globs=("*",))
+        assert guard.remove_enabled is False
+        assert not guard.decide_remove("anything").allowed
+
+
+class TestTheTwoAllowListsAreIndependent:
+    """ "Restart anything, delete only the scratch containers" has to be sayable."""
+
+    guard = ControlGuard(
+        control_enabled=True,
+        allow_globs=("*",),
+        remove_globs=("scratch-*",),
+        self_identity=frozenset({SELF_ID, "me"}),
+    )
+
+    def test_removal_is_narrower_than_control(self):
+        assert self.guard.controllable("keelson-router") is True
+        assert self.guard.removable("keelson-router") is False
+        assert self.guard.removable("scratch-1") is True
+
+    def test_the_refusal_names_the_remove_list_not_the_control_one(self):
+        reason = self.guard.decide_remove("keelson-router").reason
+        assert "remove allow-list" in reason
+        assert "scratch-*" in reason
+
+    def test_removal_can_also_be_wider_than_control(self):
+        # Not a configuration to recommend, but the lists are independent rather
+        # than nested, and a guard that silently intersected them would make the
+        # narrower case above a lie too.
+        guard = ControlGuard(control_enabled=True, allow_globs=("keelson-*",), remove_globs=("*",))
+        assert guard.controllable("grafana") is False
+        assert guard.removable("grafana") is True
+
+    def test_the_responders_own_container_is_never_removable(self):
+        # Even under remove_globs=("*",) -- self-protection is checked first.
+        assert self.guard.removable("me") is False
+        assert self.guard.removable("scratch-1", SELF_ID) is False
+
+    def test_remove_enabled_is_derived_not_stored(self):
+        # There is no boolean to disagree with the list, which is the failure
+        # mode --allow-control needed a startup check for.
+        assert self.guard.remove_enabled is True
+        assert ControlGuard(control_enabled=True, allow_globs=("*",)).remove_enabled is False

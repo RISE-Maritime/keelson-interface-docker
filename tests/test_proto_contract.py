@@ -19,13 +19,15 @@ from keelson_interface_docker.interfaces import (
     GetLogsResponse,
     ListContainersResponse,
     LogLine,
+    RemoveContainerRequest,
+    RemoveContainerResponse,
 )
 from keelson_interface_docker.interfaces.ContainerControl_pb2 import DESCRIPTOR
 
 # serve_rpc advertises the COMPLETE interface through one liveliness token, so a
 # procedure declared here without a handler would be advertised and never answer.
 # tests/test_handlers.py asserts the other half of this equality.
-PROCEDURES = ["list", "logs", "start", "stop", "restart"]
+PROCEDURES = ["list", "logs", "start", "stop", "restart", "remove"]
 
 CONTAINER_INFO_FIELDS = {
     "name": 1,
@@ -44,6 +46,7 @@ CONTAINER_INFO_FIELDS = {
     "controllable": 14,
     "compose_project": 15,
     "compose_service": 16,
+    "removable": 17,
 }
 
 
@@ -51,7 +54,7 @@ def field_numbers(message_cls) -> dict[str, int]:
     return {f.name: f.number for f in message_cls.DESCRIPTOR.fields}
 
 
-def test_the_service_declares_exactly_the_five_procedures_in_order():
+def test_the_service_declares_exactly_the_six_procedures_in_order():
     service = DESCRIPTOR.services_by_name["ContainerControl"]
     assert [m.name for m in service.methods] == PROCEDURES
 
@@ -65,6 +68,7 @@ def test_response_field_numbers_are_pinned():
         "containers": 1,
         "observed_at": 2,
         "control_enabled": 3,
+        "remove_enabled": 4,
     }
     assert field_numbers(GetLogsResponse) == {
         "name": 1,
@@ -74,6 +78,41 @@ def test_response_field_numbers_are_pinned():
         "tail_lines": 5,
     }
     assert field_numbers(LogLine) == {"time": 1, "stream": 2, "text": 3}
+    assert field_numbers(RemoveContainerRequest) == {
+        "name": 1,
+        "force": 2,
+        "remove_volumes": 3,
+    }
+    assert field_numbers(RemoveContainerResponse) == {
+        "name": 1,
+        "id": 2,
+        "force_applied": 3,
+    }
+
+
+def test_remove_answers_its_own_message_not_container_action_response():
+    """A ContainerInfo cannot describe a container that no longer exists.
+
+    Reusing ContainerActionResponse here would have been the smaller diff and a
+    lie on the wire: its `container` field promises post-action state, and after
+    a removal there is none to read.
+    """
+    service = DESCRIPTOR.services_by_name["ContainerControl"]
+    methods = {m.name: m for m in service.methods}
+    assert methods["remove"].output_type.name == "RemoveContainerResponse"
+    assert methods["restart"].output_type.name == "ContainerActionResponse"
+
+
+def test_removable_is_a_field_of_its_own_not_an_alias_for_controllable():
+    """The two gates are separate all the way to the wire.
+
+    A client greys its Remove button on `removable`; if this ever collapses into
+    `controllable`, every read-only-for-removal responder starts advertising a
+    button that each call refuses.
+    """
+    fields = {f.name for f in ContainerInfo.DESCRIPTOR.fields}
+    assert {"controllable", "removable"} <= fields
+    assert field_numbers(ContainerInfo)["removable"] == 17
 
 
 def test_the_package_name_is_the_one_keelson_will_adopt():
@@ -126,6 +165,7 @@ class TestPublishedState:
             "control_enabled": 3,
             "trigger": 4,
             "sequence": 5,
+            "remove_enabled": 6,
         }
 
     def test_the_first_three_numbers_match_the_rpc_response(self):
@@ -140,6 +180,18 @@ class TestPublishedState:
         for name in ("containers", "observed_at", "control_enabled"):
             assert published[name] == answered[name]
 
+    def test_and_the_alignment_deliberately_stops_at_remove_enabled(self):
+        # 4 and 5 were already spent here on trigger and sequence, which the RPC
+        # response has no equivalent of. Pinned so the divergence reads as a
+        # decision rather than as drift someone should "fix" by renumbering a
+        # field that is already on the wire.
+        from keelson_interface_docker.interfaces.ContainerControl_pb2 import (
+            ContainerHostStatus,
+        )
+
+        assert field_numbers(ContainerHostStatus)["remove_enabled"] == 6
+        assert field_numbers(ListContainersResponse)["remove_enabled"] == 4
+
     def test_status_trigger_distinguishes_a_change_from_a_keep_alive(self):
         from keelson_interface_docker.interfaces.ContainerControl_pb2 import StatusTrigger
 
@@ -147,11 +199,13 @@ class TestPublishedState:
         assert StatusTrigger.Value("STATUS_TRIGGER_CHANGE") == 1
         assert StatusTrigger.Value("STATUS_TRIGGER_HEARTBEAT") == 2
 
-    def test_adding_it_did_not_add_a_sixth_procedure(self):
-        # The README rules out a sixth procedure as a v2-requiring break. A
-        # published message is not one, and this is what says so.
+    def test_publishing_added_no_procedure(self):
+        # A continuous stream is pub/sub and no `rpc` expresses it, so this
+        # message must not have grown one. `remove` IS a procedure and is in
+        # PROCEDURES; container_status is not and never will be.
         service = DESCRIPTOR.services_by_name["ContainerControl"]
         assert [m.name for m in service.methods] == PROCEDURES
+        assert "container_status" not in [m.name for m in service.methods]
 
 
 class TestSubjectRegistration:
@@ -324,11 +378,12 @@ class TestPublishedStats:
         assert decoded.containers[0].cpu_load_pct == pytest.approx(250.5)
         assert decoded.sequence == 7
 
-    def test_adding_it_did_not_add_a_sixth_procedure(self):
+    def test_publishing_added_no_procedure(self):
         # The second published message, and the same guarantee: publishing is
-        # not an interface change. Still five.
+        # not an interface change.
         service = DESCRIPTOR.services_by_name["ContainerControl"]
         assert [m.name for m in service.methods] == PROCEDURES
+        assert "container_stats" not in [m.name for m in service.methods]
 
 
 class TestRegistriesShipInsideThePackage:

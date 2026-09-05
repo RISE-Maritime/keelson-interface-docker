@@ -1,7 +1,7 @@
 """Keelson RPC responder exposing this host's containers as container_control/v1.
 
-Serves five procedures -- list, logs, start, stop, restart -- on the keelson RPC
-key space:
+Serves six procedures -- list, logs, start, stop, restart, remove -- on the
+keelson RPC key space:
 
     {realm}/@v0/{entity_id}/@rpc/container_control/v1/{procedure}/{source_id}
 
@@ -9,6 +9,11 @@ READ-ONLY BY DEFAULT. Mounting the Docker socket makes this process
 root-equivalent on its host, so the mutating procedures refuse with
 PERMISSION_DENIED until it is started with --allow-control and an explicit
 --allow allow-list.
+
+REMOVE IS OFF EVEN THEN. --allow-control covers the reversible verbs only;
+`remove` needs --allow-remove GLOB on top of it. Upgrading a responder that has
+had control enabled for months must not hand it the power to delete containers
+because a new image happened to grow the procedure.
 """
 
 from __future__ import annotations
@@ -69,7 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Permit start/stop/restart. Requires at least one --allow. Without "
-            "it this responder answers list and logs only."
+            "it this responder answers list and logs only. Does NOT enable "
+            "remove -- see --allow-remove."
         ),
     )
     control.add_argument(
@@ -80,6 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Container NAME glob that may be controlled; repeatable. Use '*' to "
             "mean every container, deliberately."
+        ),
+    )
+    control.add_argument(
+        "--allow-remove",
+        metavar="GLOB",
+        action="append",
+        default=[],
+        help=(
+            "Container NAME glob that may be REMOVED; repeatable. Enabling this "
+            "at all is what enables the remove procedure -- there is no separate "
+            "boolean to get out of step with it. Requires --allow-control, and "
+            "is matched independently of --allow, so 'restart anything, delete "
+            "only the scratch containers' is sayable. Removal is the one action "
+            "here no other call can undo."
         ),
     )
     control.add_argument(
@@ -218,6 +238,7 @@ def build_guard(args: argparse.Namespace, backend: DockerBackend) -> ControlGuar
     return ControlGuard(
         control_enabled=True,
         allow_globs=tuple(args.allow),
+        remove_globs=tuple(args.allow_remove),
         self_identity=identity,
     )
 
@@ -320,6 +341,21 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
                 "Pass --allow-control with one or more --allow GLOB to enable them."
             )
 
+        # Its own line at its own level. Control is recoverable and removal is
+        # not, so an operator reading a startup log should not have to infer the
+        # destructive half from the sentence above it.
+        if ctx.guard.remove_enabled:
+            logger.warning(
+                "Container REMOVAL is ENABLED for names matching: %s -- these can be "
+                "deleted over the bus, and no other procedure undoes that.",
+                ", ".join(ctx.guard.remove_globs),
+            )
+        else:
+            logger.info(
+                "Removal is off: remove will reply PERMISSION_DENIED. "
+                "Pass --allow-remove GLOB (with --allow-control) to enable it."
+            )
+
         # Inside the liveliness context, so the subject token is up before the
         # first line is published and comes down after the last.
         with ExitStack() as stack:
@@ -383,6 +419,12 @@ def main() -> None:
     # --allow-control and no globs would look enabled and refuse everything.
     if args.allow_control and not args.allow:
         parser.error("--allow-control requires at least one --allow GLOB")
+
+    # Removal without control is not a posture anyone wants, and it would skip
+    # build_guard's self-identity resolution -- leaving the responder able to
+    # delete its own container.
+    if args.allow_remove and not args.allow_control:
+        parser.error("--allow-remove requires --allow-control")
 
     setup_logging(level=args.log_level)
     zenoh.init_log_from_env_or(logging.getLevelName(args.log_level))

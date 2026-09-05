@@ -138,7 +138,17 @@ def image_reference(snapshot: ContainerSnapshot) -> str:
     return configured or snapshot.image_id or ""
 
 
-def build_container_info(snapshot: ContainerSnapshot, *, controllable: bool) -> ContainerInfo:
+def build_container_info(
+    snapshot: ContainerSnapshot, *, controllable: bool, removable: bool
+) -> ContainerInfo:
+    """Render one snapshot as the wire message.
+
+    Both permission flags are REQUIRED keywords rather than defaulted. They are
+    the two fields a client greys its buttons on, and a call site that forgot one
+    would ship a plausible-looking message claiming the wrong thing -- silently,
+    since False is a valid answer. Making it a TypeError means a new call site
+    has to decide.
+    """
     attrs = snapshot.attrs or {}
     state = attrs.get("State") or {}
     host_config = attrs.get("HostConfig") or {}
@@ -155,6 +165,7 @@ def build_container_info(snapshot: ContainerSnapshot, *, controllable: bool) -> 
         restart_count=int(attrs.get("RestartCount") or 0),
         health=health_status(state),
         controllable=controllable,
+        removable=removable,
         compose_project=str(labels.get(COMPOSE_PROJECT_LABEL, "") or ""),
         compose_service=str(labels.get(COMPOSE_SERVICE_LABEL, "") or ""),
     )
