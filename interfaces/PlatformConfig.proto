@@ -1,0 +1,470 @@
+syntax = "proto3";
+
+package keelson.interfaces.platform_config;
+
+import "google/protobuf/timestamp.proto";
+
+// RPC interface for reading and editing the platform configuration repository
+// on one host: list the entities defined in it, list and read their files,
+// write and delete those files, and keep the result synchronised with the
+// upstream git remote.
+//
+// Contract, not implementation. The reference server is
+// RISE-Maritime/keelson-interface-docker, which serves a working tree of
+// RISE-Maritime/keelson-platforms, but nothing here is git-shaped beyond
+// RepoStatus and CommitInfo: the procedures describe files and entities.
+//
+// A SEPARATE INTERFACE FROM container_control/v1, DELIBERATELY. The two are
+// served by the same reference process but they are not the same contract, and
+// container_control/v1 is mid-migration into the keelson monorepo (see the
+// README's upstreaming section). Adding these procedures there would enlarge
+// that migration unit for no reason. They are also independently enabled: a
+// responder may serve either, both, or neither, and serve_rpc's liveliness
+// token advertises a COMPLETE interface, so each is declared only when its
+// flags are present.
+//
+// AN ENTITY IS A DIRECTORY NAME, not a keelson entity id, and the two disagree
+// in this repository today: platforms/sealog-9/docker-compose.config.yml passes
+// `-e ssrs18`, platforms/usv uses `-e storakrabban` in some files and `-e usv`
+// in others. This interface reports what is on disk. Reconciling the two is a
+// job for the operator reading the result, and surfacing the disagreement is
+// half the point of building it.
+//
+// FILES ARE ADDRESSED BY PATH RELATIVE TO THE REPOSITORY ROOT -- "platforms/
+// sealog-9/docker-compose.rec-mcap.yml" -- never absolutely. The responder's
+// root is deployment configuration the caller does not know and must not be
+// able to influence; an absolute path, a `..` component, a `.git` component, or
+// a symlink leaving the root is INVALID_ARGUMENT, decided before the file is
+// looked up so that a refusal cannot be used to probe what exists.
+//
+// WRITING IS EXPECTED TO BE REFUSED, on the same grounds control is refused in
+// container_control/v1 and with the same consequence for clients:
+// PERMISSION_DENIED is a NORMAL outcome, not an error condition. The reference
+// responder is read-only unless configured otherwise.
+//
+// THERE ARE FOUR GATES, NOT ONE, and they are four separate questions:
+//
+//   write_enabled   -- may a file be changed at all
+//   delete_enabled  -- may a file be removed (irreversible; not implied by write)
+//   git_enabled     -- is a change committed, or only written to the tree
+//   push_enabled    -- is a commit published to the remote, where every other
+//                      platform will pull it
+//
+// Each is its own field with its own number, and NONE is derived from another.
+// The ordinary configuration is write on, delete off, git on, push off: edit and
+// commit locally, a human publishes. A client that greys its Save button on
+// `git_enabled`, or offers Delete because `write_enabled` is set, is reading the
+// wrong field and will offer actions every call refuses.
+//
+// THIS INTERFACE DEFINES NO PUB/SUB SUBJECTS, and file content travels only as
+// an RPC reply. That is a contract statement, not an omission to be filled in
+// later: keelson RPC replies are handed back as raw bytes, whereas subscription
+// payloads are marshalled on their way to a consumer, and at least one client
+// (Crowsnest's SharedWorker) turns a Uint8Array into a numeric-keyed object on
+// that path unless the subject is explicitly listed as raw. A "file changed"
+// notification carrying content would be silently corrupted for that consumer
+// and fine for every other, which is the worst way for a bug to present. If
+// such a subject is ever added, it carries a path and a hash, not bytes.
+//
+// COMMIT AUTHORSHIP IS NOT AUTHENTICATED. The commit author is whatever git
+// identity the responder's host is configured with -- one identity for every
+// operator at every station. CommitInfo.operator_id carries the caller's
+// self-declared label and NOTHING VERIFIES IT. A client displaying it must say
+// so; a client that renders it as though it were an authenticated actor is
+// lying about an audit trail that other platforms pull their configuration
+// from.
+
+// -----------------------------------------------------------------------------
+// Enumerations
+// -----------------------------------------------------------------------------
+
+// What a file is for, as far as a configuration browser needs to care. This is a
+// presentation hint derived from the name and location, not a parse: COMPOSE
+// means "named like a compose file", not "valid compose". A client uses it to
+// choose an icon and a default view, and must not assume a file it cannot parse
+// was mislabelled by the responder.
+//
+// YAML and COMPOSE are distinct because the repository contains both, and they
+// are not interchangeable: netplan-*.yaml and extra/*.subjects.yaml are YAML
+// that a compose-aware view would misread.
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_COMPOSE = 1;
+  FILE_KIND_YAML = 2;
+  FILE_KIND_ENV = 3;
+  FILE_KIND_JSON = 4;
+  FILE_KIND_MARKDOWN = 5;
+  FILE_KIND_OTHER = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Common messages
+// -----------------------------------------------------------------------------
+
+// The state of the responder's working tree against its remote.
+//
+// A MESSAGE, NOT INLINE FIELDS, and this is worth stating because it appears in
+// four responses. container_control/v1 has a live trap here: remove_enabled is
+// field 4 on ListContainersResponse and field 6 on ContainerHostStatus, because
+// the status message had already spent 4 and 5 -- so a client that assumes the
+// two align misdecodes silently. Embedding one message means there is only ever
+// one set of numbers to agree on.
+message RepoStatus {
+  // The checked-out branch, or "" when HEAD is detached -- in which case
+  // `detached` is set and `head_sha` is the only meaningful position.
+  string branch = 1;
+
+  // Full 40-character SHA of HEAD. Not abbreviated: the length at which an
+  // abbreviation stays unique is a property of the repository at a moment, and
+  // a client that wants seven characters can take them.
+  string head_sha = 2;
+
+  // The `origin` fetch URL, for a client that wants to link to the forge. May
+  // be an SSH remote (git@github.com:...), which is not a URL a browser can
+  // follow -- translate before rendering it as a link.
+  string remote_url = 3;
+
+  // Commits HEAD has that the remote-tracking branch does not, and vice versa,
+  // as of `last_fetch_at`. BOTH ARE STALE BY CONSTRUCTION: they are computed
+  // against the last fetch, not against the remote as it is now. A client
+  // showing "up to date" is showing "up to date as of a time", and should show
+  // the time with it.
+  uint32 ahead = 4;
+  uint32 behind = 5;
+
+  // Repository-relative paths with uncommitted changes, staged or not,
+  // including untracked files. This is the whole tree, not one entity: a
+  // configuration edited on the host outside this interface shows up here, and
+  // that is the point.
+  repeated string dirty_paths = 6;
+
+  // When the responder last successfully fetched from the remote. Unset if it
+  // never has this process lifetime -- in which case `ahead` and `behind` are
+  // measured against whatever the tree was last told, which may be old.
+  google.protobuf.Timestamp last_fetch_at = 7;
+
+  // HEAD is not on a branch. Set alongside an empty `branch`. A responder in
+  // this state will refuse to push: there is no branch to push to, and guessing
+  // one is how an operator's work ends up on the wrong ref.
+  bool detached = 8;
+}
+
+// A commit this interface created.
+message CommitInfo {
+  // Full 40-character SHA, for the same reason as RepoStatus.head_sha.
+  string sha = 1;
+
+  // The commit's subject and body as written, including the operator trailer
+  // described below.
+  string message = 2;
+
+  // The git identity the responder's host is configured with. This is the only
+  // verified thing here, and it identifies a HOST, not a person.
+  string author_name = 3;
+  string author_email = 4;
+
+  google.protobuf.Timestamp committed_at = 5;
+
+  // The caller's self-declared operator label, echoed back from the request and
+  // recorded in the commit message as a trailer:
+  //
+  //     Crowsnest-Operator: shore-control-1 (unverified)
+  //
+  // NOTHING VERIFIES THIS. There is no authentication anywhere on this bus: the
+  // value is whatever the client sent, the client got it from a local setting
+  // any operator can edit, and a peer that never opens Crowsnest can send
+  // anything at all. It is recorded because an unverified attribution is more
+  // useful than none when reconstructing what happened, and it is spelled
+  // "(unverified)" in the trailer itself so that a `git log` read years later
+  // carries the caveat with the claim.
+  //
+  // A CLIENT MUST NOT RENDER THIS AS AN AUTHENTICATED ACTOR. Show it labelled,
+  // or do not show it.
+  string operator_id = 6;
+}
+
+// One directory under platforms/.
+message EntityInfo {
+  // The directory name, which is the entity's identity in this interface. See
+  // the header: this is NOT necessarily the keelson entity id its compose files
+  // pass to `-e`.
+  string name = 1;
+
+  // Repository-relative path to the directory, e.g. "platforms/sealog-9". A
+  // client builds file paths from this rather than assembling "platforms/" +
+  // name itself, so that a responder whose layout differs still works.
+  string relative_path = 2;
+
+  // How many files the responder is willing to list here.
+  //
+  // Not optional, unlike service_count below, and the asymmetry is the point:
+  // this is a directory listing. A directory that cannot be read is NOT_FOUND
+  // or IO_FAILURE, not a zero, so 0 here means exactly one thing -- the
+  // directory is empty.
+  uint32 file_count = 3;
+
+  // How many compose services those files define in total.
+  //
+  // OPTIONAL, BECAUSE ABSENT AND ZERO ARE DIFFERENT ANSWERS. This is a cheap
+  // parse of free-text YAML that this repository is full of counter-examples
+  // to; a malformed compose file yields no count. Without presence, 0 would
+  // mean both "this entity defines no services" and "I could not parse it",
+  // and a client cannot tell them apart -- so a row would read "0 services"
+  // about a directory whose compose file is merely broken, stating as a fact
+  // about the platform what is actually a fact about the parser.
+  //
+  // Absent renders as a dash, present-zero renders as "0 services".
+  // ContainerControl.proto leans on proto3 presence in eighteen places on
+  // ContainerResourceUsage for precisely this reason.
+  optional uint32 service_count = 4;
+
+  // A README.md (or equivalent) exists in this directory. Seven of the twenty
+  // entities have none, and knowing which before opening one is useful.
+  bool has_readme = 5;
+
+  // Anything under this directory is uncommitted. The per-file flag is on
+  // FileInfo; this is the roll-up, so a client can mark the entity row without
+  // listing its files.
+  bool dirty = 6;
+}
+
+// One file inside an entity directory.
+message FileInfo {
+  // Base name, e.g. "docker-compose.rec-mcap.yml".
+  string name = 1;
+
+  // Repository-relative path. THIS is what read_file, write_file and
+  // delete_file take -- never `name`, which is not unique across entities.
+  string relative_path = 2;
+
+  uint64 size_bytes = 3;
+
+  // Filesystem modification time, which is NOT commit time: a file pulled from
+  // the remote has the time it was written locally. Use CommitInfo for history.
+  google.protobuf.Timestamp modified_at = 4;
+
+  FileKind kind = 5;
+
+  // This file has uncommitted changes, or is untracked.
+  bool dirty = 6;
+
+  // The responder would accept a write / a delete for this path right now.
+  //
+  // TWO FIELDS BECAUSE THEY ARE TWO GATES. A file may be writable and not
+  // deletable -- that is the ordinary configuration. A client that greys its
+  // Delete button on `writable` will offer an action every call refuses. Both
+  // already account for the responder-level enables, so a client can read the
+  // per-file flag alone.
+  bool writable = 7;
+  bool deletable = 8;
+}
+
+// -----------------------------------------------------------------------------
+// Procedure messages
+// -----------------------------------------------------------------------------
+
+// No arguments: the responder serves exactly one repository, configured at
+// deploy time. An empty payload is valid.
+message ListEntitiesRequest {}
+
+message ListEntitiesResponse {
+  repeated EntityInfo entities = 1;
+
+  RepoStatus repo = 2;
+
+  // When the responder finished reading the tree.
+  google.protobuf.Timestamp observed_at = 3;
+
+  // The four gates. See the header: four questions, four fields, none derived
+  // from another. These are responder-level; the per-file flags on FileInfo
+  // narrow them further by path allow-list.
+  bool write_enabled = 4;
+  bool delete_enabled = 5;
+  bool git_enabled = 6;
+  bool push_enabled = 7;
+}
+
+message ListFilesRequest {
+  // An EntityInfo.name from list_entities. NOT_FOUND if no such directory.
+  string entity = 1;
+}
+
+message ListFilesResponse {
+  string entity = 1;
+  repeated FileInfo files = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message ReadFileRequest {
+  // FileInfo.relative_path. See the header on path rules.
+  string path = 1;
+}
+
+message ReadFileResponse {
+  string path = 1;
+
+  // The file's bytes, verbatim.
+  //
+  // BYTES, NOT STRING, AND THE DISTINCTION IS LOAD-BEARING. proto3 `string`
+  // must be valid UTF-8, so a single stray byte -- a latin-1 degree sign in a
+  // comment about a sensor's mounting angle, which is exactly the kind of thing
+  // in these files -- would make a file unreadable through this interface
+  // rather than merely odd-looking. The responder does not transcode, does not
+  // normalise line endings, and does not add or strip a trailing newline: what
+  // is written back must be able to be byte-identical to what was read, or an
+  // editor that opens and saves a file produces a diff nobody asked for.
+  bytes content = 2;
+
+  // SHA-256 of `content`, hex, lowercase. Pass it back as
+  // WriteFileRequest.base_sha256 to make the write conditional. This is the
+  // whole optimistic-concurrency mechanism.
+  string sha256 = 3;
+
+  uint64 size_bytes = 4;
+  google.protobuf.Timestamp modified_at = 5;
+
+  // Whether a write to this path would be accepted, so a client can open a file
+  // read-only without a second round trip.
+  bool writable = 6;
+
+  // The responder returned a prefix because the file exceeds its size limit.
+  // A TRUNCATED FILE MUST NOT BE WRITTEN BACK -- doing so silently discards the
+  // remainder. A client seeing this must refuse to edit, not merely warn.
+  bool truncated = 7;
+}
+
+message WriteFileRequest {
+  // Repository-relative path. Its parent directory must already exist: this
+  // interface edits an entity's configuration, it does not create entities.
+  string path = 1;
+
+  // The complete new contents. Not a patch: the responder replaces the file.
+  bytes content = 2;
+
+  // SHA-256 of the content this edit was based on, as returned by read_file.
+  //
+  // EMPTY MEANS "I EXPECT THIS FILE NOT TO EXIST" -- the create case. It does
+  // NOT mean "I do not care": there is deliberately no way to express that,
+  // because a blind overwrite of a file someone else changed is the failure
+  // this field exists to prevent.
+  //
+  // A mismatch is INVALID_STATE, not an error to retry: the file changed under
+  // the editor, and the caller must re-read and re-apply. Clients should render
+  // this as a "the file changed on disk -- reload and re-apply your edit?"
+  // confirmation, the way container_control/v1's INVALID_STATE on removing a
+  // running container becomes a second confirmation rather than a red banner.
+  string base_sha256 = 3;
+
+  // Commit subject. The responder may append trailers (see
+  // CommitInfo.operator_id) but does not otherwise rewrite it. Ignored when the
+  // responder is not git_enabled, in which case the file is written and
+  // WriteFileResponse.commit is unset.
+  string commit_message = 4;
+
+  // The caller's self-declared operator label. UNVERIFIED -- see
+  // CommitInfo.operator_id, which is where the consequences are written down.
+  string operator_id = 5;
+}
+
+message WriteFileResponse {
+  string path = 1;
+
+  // SHA-256 of the content as written. A client keeps this as the base for its
+  // next edit, so that saving twice in a row does not require a re-read.
+  string sha256 = 2;
+
+  // Unset when the responder is not git_enabled: the file was written to the
+  // working tree and nothing was committed.
+  CommitInfo commit = 3;
+
+  // Whether the commit reached the remote.
+  //
+  // FALSE IS NOT A FAILED SAVE, and this is the most important thing in this
+  // message. The write and the commit are complete and durable; only
+  // publication did not happen. A responder that is not push_enabled reports
+  // false with an empty push_error. A responder that tried and could not --
+  // most often a rebase that conflicted, which it aborts rather than resolving
+  // -- reports false with the reason in push_error, having LEFT THE COMMIT
+  // STANDING LOCALLY. The operator's work is safe in both cases and the UI must
+  // say so: "committed locally, not published", not "save failed".
+  bool pushed = 4;
+
+  // Why `pushed` is false, when it was attempted. Empty when push is simply not
+  // enabled. Human-readable and may be multi-line -- git's conflict output is
+  // the useful part and is passed through rather than summarised.
+  string push_error = 5;
+
+  // The tree's state after the write, so a client can update its status bar
+  // without a second call. Note `ahead` will be non-zero after an unpushed
+  // commit -- that is the "committed locally" indicator.
+  RepoStatus repo = 6;
+}
+
+message DeleteFileRequest {
+  string path = 1;
+
+  // As on WriteFileRequest, with one difference: empty is NOT permitted here.
+  // Deleting a file requires having read the version being deleted -- there is
+  // no "delete whatever is there" -- so an empty base_sha256 is
+  // INVALID_ARGUMENT.
+  string base_sha256 = 2;
+
+  string commit_message = 3;
+  string operator_id = 4;
+}
+
+message DeleteFileResponse {
+  string path = 1;
+  CommitInfo commit = 2;
+  bool pushed = 3;
+  string push_error = 4;
+  RepoStatus repo = 5;
+}
+
+// No arguments; empty payload is valid.
+message RepoStatusRequest {}
+
+message RepoStatusResponse {
+  RepoStatus repo = 1;
+
+  // The same four gates as on ListEntitiesResponse, so a client can render its
+  // status bar and decide what to offer without listing entities first. Same
+  // numbers are NOT reused across the two messages by accident -- these are
+  // 2..5 here and 4..7 there. Read them from the message you actually received.
+  bool write_enabled = 2;
+  bool delete_enabled = 3;
+  bool git_enabled = 4;
+  bool push_enabled = 5;
+}
+
+// No arguments; empty payload is valid.
+message SyncRequest {}
+
+message SyncResponse {
+  // The tree's state after the attempt.
+  RepoStatus repo = 1;
+
+  // A rebase actually replayed local commits onto new upstream ones. False when
+  // the fetch found nothing to do -- which is a successful sync, not a no-op
+  // worth reporting as failure.
+  bool rebased = 2;
+
+  // Non-empty when the rebase conflicted and was aborted. The tree is unchanged
+  // and still holds its local commits; a human resolves this at a terminal.
+  // Multi-line git output, passed through.
+  string conflict = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service PlatformConfig {
+  rpc list_entities(ListEntitiesRequest) returns (ListEntitiesResponse);
+  rpc list_files(ListFilesRequest) returns (ListFilesResponse);
+  rpc read_file(ReadFileRequest) returns (ReadFileResponse);
+  rpc write_file(WriteFileRequest) returns (WriteFileResponse);
+  rpc delete_file(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc repo_status(RepoStatusRequest) returns (RepoStatusResponse);
+  rpc sync(SyncRequest) returns (SyncResponse);
+}
