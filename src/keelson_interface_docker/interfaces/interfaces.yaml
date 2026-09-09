@@ -12,3 +12,10 @@
 # See README -> "Upstreaming this interface into keelson".
 
 container_control/v1: keelson.interfaces.container_control.ContainerControl
+
+# platform_config/v1 is a SECOND, INDEPENDENT interface served by this repo, not
+# part of container_control's upstreaming unit above. It reads and edits the
+# working tree of RISE-Maritime/keelson-platforms -- the compose files every
+# entity is deployed from -- and is declared only when --platforms-root is given,
+# so a deployment may serve either interface without the other.
+platform_config/v1: keelson.interfaces.platform_config.PlatformConfig

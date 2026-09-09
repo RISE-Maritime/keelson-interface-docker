@@ -27,6 +27,12 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+      # The platforms checkout, for platform_config/v1. Read-WRITE: --allow-write
+      # is set below. The container path is what --platforms-root takes -- the
+      # host path means nothing in here, and an --allow-path glob is relative to
+      # this root, never absolute.
+      - /home/sealog/keelson-platforms:/repo
+
     # The image runs as uid 10001, which cannot open a root:docker 0660 socket.
     # Add the host's docker group rather than running as root:
     #
@@ -43,6 +49,11 @@ services:
     # socket either, so the responder exits at startup with a message naming
     # DOCKER_GID rather than running blind. The check lives there, where it can
     # see the actual socket, instead of here where it can only see a variable.
+    # The image's own uid is 10001, and the checkout is owned by sealog (1000).
+    # Writing to a bind mount is checked against the HOST's ownership, so without
+    # this every write_file fails EACCES no matter what the guard allows.
+    # group_add still carries docker-socket access.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     group_add:
       - "${DOCKER_GID:-0}"
 
@@ -99,3 +110,8 @@ services:
       --stats-interval-s 10
       --follow-logs '*'
       --allow-remove '*'
+      --platforms-root /repo
+      --allow-write
+      --allow-path 'platforms/**'
+      --allow-push
+      --allow-git

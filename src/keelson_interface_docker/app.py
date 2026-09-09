@@ -35,10 +35,16 @@ from keelson.scaffolding import (
     setup_logging,
 )
 
-from . import handlers, logs_follower, selfid, stats_publisher, status_publisher
+from . import handlers, logs_follower, platform_handlers, selfid, stats_publisher, status_publisher
 from .backend import BackendError, DockerBackend, snapshots_by_label
 from .guard import ControlGuard
-from .interfaces import INTERFACE, VERSION
+from .interfaces import (
+    INTERFACE,
+    PLATFORM_CONFIG_INTERFACE,
+    PLATFORM_CONFIG_VERSION,
+    VERSION,
+)
+from .platform_guard import FileGuard
 
 logger = logging.getLogger("keelson-interface-docker")
 
@@ -206,6 +212,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lines of history to replay when a follow starts. 0 starts at the end.",
     )
 
+    platform = parser.add_argument_group("platform configuration (off by default)")
+    platform.add_argument(
+        "--platforms-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Serve platform_config/v1 against the keelson-platforms checkout at PATH. "
+            "Read-only unless --allow-write is also given. Omitted, the interface is not "
+            "declared at all -- a host that does not hold the checkout does not advertise it."
+        ),
+    )
+    platform.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="Permit write_file. Requires --allow-path; does NOT enable deletion or committing.",
+    )
+    platform.add_argument(
+        "--allow-path",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "Repository-relative glob a write may target, e.g. 'platforms/sealog-9/**'. "
+            "Segment-aware: * stays within one path segment, ** spans any number. "
+            "Repeatable."
+        ),
+    )
+    platform.add_argument(
+        "--allow-delete",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "Globs delete_file may remove. Its own list, not a subset of --allow-path: "
+            "deletion is the one irreversible verb here and is never implied by writing."
+        ),
+    )
+    platform.add_argument(
+        "--allow-git",
+        action="store_true",
+        help="Commit each write. Without it, edits land in the working tree uncommitted.",
+    )
+    platform.add_argument(
+        "--allow-push",
+        action="store_true",
+        help=(
+            "Push each commit to origin. Requires --allow-git. THE ONLY GATE THAT LEAVES "
+            "THIS HOST: keelson-platforms is what every other platform pulls its configs from."
+        ),
+    )
+
     limits = parser.add_argument_group("limits")
     limits.add_argument("--stop-timeout-s", type=int, default=10)
     limits.add_argument("--default-tail-lines", type=int, default=200)
@@ -294,6 +351,92 @@ def _log_addresses(args: argparse.Namespace, published_subjects: list[str]) -> N
         )
 
 
+def build_file_guard(args: argparse.Namespace) -> FileGuard:
+    """Assemble the four file gates from the flags. Every one defaults off."""
+    return FileGuard(
+        write_enabled=bool(args.allow_write),
+        write_globs=tuple(args.allow_path),
+        delete_globs=tuple(args.allow_delete),
+        git_enabled=bool(args.allow_git),
+        push_enabled=bool(args.allow_push),
+    )
+
+
+def _serve_platform_config(session: zenoh.Session, args: argparse.Namespace) -> None:
+    """Declare platform_config/v1, if this host holds a platforms checkout.
+
+    A SECOND, INDEPENDENT serve_rpc CALL, not an extension of the first. The two
+    interfaces are separately declared so a deployment can run this image twice
+    -- once with the Docker socket and no checkout, once with the checkout and a
+    push credential and no socket -- which is how the trust boundary a single
+    combined responder would merge gets recovered.
+    """
+    if not args.platforms_root:
+        return
+
+    root = Path(args.platforms_root)
+    if not (root / ".git").is_dir():
+        sys.exit(
+            f"--platforms-root {root} is not a git repository.\n"
+            "It must be a checkout of RISE-Maritime/keelson-platforms: the interface "
+            "reports branch, divergence and dirty paths, none of which exist without one."
+        )
+
+    guard = build_file_guard(args)
+    ctx = platform_handlers.PlatformContext(root=root, guard=guard)
+    procedures, summarizers = platform_handlers.build(ctx)
+
+    serve_rpc(
+        session,
+        base_path=args.realm,
+        entity_id=args.entity_id,
+        responder_id=args.source_id,
+        interface=PLATFORM_CONFIG_INTERFACE,
+        version=PLATFORM_CONFIG_VERSION,
+        handlers=procedures,
+        summarizers=summarizers,
+        log=logger,
+    )
+
+    logger.info(
+        "Serving %s/%s at %s/@v0/%s/@rpc/%s/%s/*/%s (root: %s)",
+        PLATFORM_CONFIG_INTERFACE,
+        PLATFORM_CONFIG_VERSION,
+        args.realm,
+        args.entity_id,
+        PLATFORM_CONFIG_INTERFACE,
+        PLATFORM_CONFIG_VERSION,
+        args.source_id,
+        root,
+    )
+
+    # Each gate on its own line at its own level. An operator reading a startup
+    # log must not have to infer the destructive or outward-facing half from a
+    # sentence about the reversible one.
+    if guard.write_enabled:
+        logger.warning(
+            "Platform config WRITING is ENABLED for paths matching: %s",
+            ", ".join(guard.write_globs),
+        )
+    else:
+        logger.info("Platform config is read-only. Pass --allow-write with --allow-path to edit.")
+
+    if guard.delete_enabled:
+        logger.warning(
+            "Platform config DELETION is ENABLED for paths matching: %s -- these files can "
+            "be removed over the bus, and no other procedure undoes that.",
+            ", ".join(guard.delete_globs),
+        )
+
+    if guard.push_enabled:
+        logger.warning(
+            "Platform config PUSH is ENABLED: commits made here are published to the "
+            "repository every other platform pulls its configuration from."
+        )
+    elif guard.git_enabled:
+        logger.info("Commits stay on this host; --allow-push is not set.")
+
+
 def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context) -> None:
     procedures, summarizers = handlers.build(ctx)
 
@@ -329,6 +472,8 @@ def run(session: zenoh.Session, args: argparse.Namespace, ctx: handlers.Context)
             summarizers=summarizers,
             log=logger,
         )
+
+        _serve_platform_config(session, args)
 
         if ctx.guard.control_enabled:
             logger.warning(
@@ -425,6 +570,22 @@ def main() -> None:
     # delete its own container.
     if args.allow_remove and not args.allow_control:
         parser.error("--allow-remove requires --allow-control")
+
+    # The same shape of check for the file gates: each privilege is refused at
+    # startup rather than on the first call, so a responder never looks enabled
+    # and refuses everything.
+    if not args.platforms_root:
+        for flag in ("allow_write", "allow_path", "allow_delete", "allow_git", "allow_push"):
+            if getattr(args, flag):
+                parser.error(f"--{flag.replace('_', '-')} requires --platforms-root")
+    if args.allow_write and not args.allow_path:
+        parser.error("--allow-write requires at least one --allow-path GLOB")
+    if args.allow_delete and not args.allow_write:
+        parser.error("--allow-delete requires --allow-write")
+    if args.allow_git and not args.allow_write:
+        parser.error("--allow-git requires --allow-write (there is nothing to commit otherwise)")
+    if args.allow_push and not args.allow_git:
+        parser.error("--allow-push requires --allow-git")
 
     setup_logging(level=args.log_level)
     zenoh.init_log_from_env_or(logging.getLevelName(args.log_level))

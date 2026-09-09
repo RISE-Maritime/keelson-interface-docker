@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Regenerate the committed protobuf bindings for interfaces/ContainerControl.proto.
+# Regenerate the committed protobuf bindings for the interfaces this repo serves:
+# interfaces/ContainerControl.proto and interfaces/PlatformConfig.proto.
 #
 # The generated *_pb2.py / *_pb2.pyi are COMMITTED. This repo has no generation
 # step between the working tree and its artifact -- the artifact is a `docker
@@ -26,6 +27,7 @@ PROTOC_WHEEL="protoc-wheel-0==30.2"
 
 OUT=src/keelson_interface_docker/interfaces
 rm -f "$OUT"/ContainerControl_pb2.py "$OUT"/ContainerControl_pb2.pyi "$OUT"/ContainerControl.desc
+rm -f "$OUT"/PlatformConfig_pb2.py "$OUT"/PlatformConfig_pb2.pyi "$OUT"/PlatformConfig.desc
 
 # The registries have to travel inside the installed package -- app.py loads
 # them with keelson.add_well_known_interfaces() and
@@ -57,4 +59,20 @@ uv run --no-project --with "$PROTOC_WHEEL" protoc \
 # class it yields is a DIFFERENT object: publish with the _pb2 class, not the
 # registry's.
 
+# platform_config/v1 is generated SEPARATELY, into its own descriptor set,
+# rather than being added to ContainerControl's. The two interfaces are
+# independently declared -- a deployment may serve either without the other, and
+# the recommended shape for a host that can push to GitHub is two containers
+# from this one image, one holding the Docker socket and one holding the
+# platforms checkout. One combined descriptor would couple them for no reason,
+# and would drag file editing into container_control's upstreaming unit.
+uv run --no-project --with "$PROTOC_WHEEL" protoc \
+    --python_out="$OUT" \
+    --pyi_out="$OUT" \
+    --descriptor_set_out="$OUT/PlatformConfig.desc" \
+    --include_imports \
+    --proto_path=interfaces \
+    interfaces/PlatformConfig.proto
+
 echo "Generated $OUT/ContainerControl_pb2.py and $OUT/ContainerControl.desc"
+echo "Generated $OUT/PlatformConfig_pb2.py and $OUT/PlatformConfig.desc"

@@ -38,34 +38,81 @@ from .ContainerControl_pb2 import (
     StatusTrigger,
     StopContainerRequest,
 )
+from .PlatformConfig_pb2 import (
+    CommitInfo,
+    DeleteFileRequest,
+    DeleteFileResponse,
+    EntityInfo,
+    FileInfo,
+    FileKind,
+    ListEntitiesRequest,
+    ListEntitiesResponse,
+    ListFilesRequest,
+    ListFilesResponse,
+    ReadFileRequest,
+    ReadFileResponse,
+    RepoStatus,
+    RepoStatusRequest,
+    RepoStatusResponse,
+    SyncRequest,
+    SyncResponse,
+    WriteFileRequest,
+    WriteFileResponse,
+)
 
 #: The ``{interface}/{version}`` this repo serves, as it appears in the keelson
 #: RPC key space and in ``interfaces/interfaces.yaml``.
 INTERFACE = "container_control"
 VERSION = "v1"
 
+#: The second interface, declared only when ``--platforms-root`` is given. Its
+#: own name and version because it is upstreamed -- if ever -- separately.
+PLATFORM_CONFIG_INTERFACE = "platform_config"
+PLATFORM_CONFIG_VERSION = "v1"
+
 __all__ = [
     "INTERFACE",
+    "PLATFORM_CONFIG_INTERFACE",
+    "PLATFORM_CONFIG_VERSION",
     "VERSION",
+    "CommitInfo",
     "ContainerActionResponse",
     "ContainerHostStats",
     "ContainerHostStatus",
     "ContainerInfo",
     "ContainerResourceUsage",
     "ContainerState",
+    "DeleteFileRequest",
+    "DeleteFileResponse",
+    "EntityInfo",
+    "FileInfo",
+    "FileKind",
     "GetLogsRequest",
     "GetLogsResponse",
     "HealthStatus",
     "ListContainersRequest",
     "ListContainersResponse",
+    "ListEntitiesRequest",
+    "ListEntitiesResponse",
+    "ListFilesRequest",
+    "ListFilesResponse",
     "LogLine",
     "LogStream",
     "LogStreamSelector",
+    "ReadFileRequest",
+    "ReadFileResponse",
     "RemoveContainerRequest",
     "RemoveContainerResponse",
+    "RepoStatus",
+    "RepoStatusRequest",
+    "RepoStatusResponse",
     "RestartContainerRequest",
     "RestartPolicy",
     "StartContainerRequest",
     "StatusTrigger",
     "StopContainerRequest",
+    "SyncRequest",
+    "SyncResponse",
+    "WriteFileRequest",
+    "WriteFileResponse",
 ]

@@ -58,7 +58,10 @@ target-version = "py313"
 # the formatter -- `ruff format` rewriting them would put the tree permanently
 # at odds with scripts/generate_protos.sh, and the CI proto-drift job would fail
 # on a clean checkout.
-extend-exclude = ["src/keelson_interface_docker/interfaces/ContainerControl_pb2.py*"]
+# The glob covers every generated binding, not just the first one: naming them
+# individually is how the second interface's file ends up linted, which is
+# exactly what happened when PlatformConfig_pb2.py arrived.
+extend-exclude = ["src/keelson_interface_docker/interfaces/*_pb2.py*"]
 
 [tool.ruff.lint]
 # Explicit, so a lint run does not depend on whatever ruff configuration happens

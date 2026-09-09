@@ -1,6 +1,19 @@
 # syntax=docker/dockerfile:1
 FROM python:3.13-slim-bookworm
 
+# git, for platform_config/v1. The interface reports branch, divergence and
+# dirty paths, and commits when --allow-git is set; slim-bookworm ships none of
+# that. openssh-client comes with it because the platforms remote is an SSH URL
+# (git@github.com:...) and a push without it fails at transport rather than at
+# credentials, which is a far more confusing error.
+#
+# Installed unconditionally rather than in a variant image: a responder started
+# without --platforms-root simply never shells out, and one image that can do
+# both jobs is what makes the two-container deployment shape possible.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y git openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv for a fast, apt-free install. No tini: zombie reaping and SIGTERM
 # forwarding come from Docker's built-in init (compose `init: true`), which is
 # what lets GracefulShutdown retract the liveliness tokens on `docker stop`
